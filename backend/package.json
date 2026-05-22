@@ -1,0 +1,22 @@
+{
+  "name": "presensi-backend",
+  "version": "1.0.0",
+  "description": "Backend API untuk Sistem Presensi Koperasi Giat",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "nodemon src/index.js",
+    "start": "node src/index.js",
+    "db:init": "node src/db/init.js",
+    "db:clear": "node src/db/clear.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "morgan": "^1.10.1",
+    "mysql2": "^3.11.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}

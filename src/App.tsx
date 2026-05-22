@@ -1,20 +1,121 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogIn, User, ShieldCheck, LogOut, Menu, X, ChevronRight, BarChart3, History, Settings, Download, Eye, EyeOff, Camera, CheckCircle2, AlertCircle, Plus, Upload, Search, Filter, ArrowLeft, MoreHorizontal, Edit2, Trash2 } from 'lucide-react';
+import { LogIn, User, ShieldCheck, LogOut, Menu, X, ChevronRight, BarChart3, History, Settings, Download, Eye, EyeOff, Camera, CheckCircle2, AlertCircle, Plus, Upload, Search, Filter, ArrowLeft, MoreHorizontal, Edit2, Trash2, MapPin, Clock as ClockIcon, Database } from 'lucide-react';
 import Clock from './components/Clock';
-import { EMPLOYEES, LOCATIONS, SHIFTS, Shift, AttendanceData } from './types';
+import { Shift, AttendanceData, Employee, AppSettings } from './types';
 import { api } from './services/api';
 import { format, isAfter, addMinutes, parse, startOfDay, subDays, isWithinInterval } from 'date-fns';
-import { Html5Qrcode } from 'html5-qrcode';
+import QrScanner from 'qr-scanner';
 import * as XLSX from 'xlsx';
 
-// Constants
-const OFFICIAL_BARCODE_CONTENT = "KOPERASI GIAT"; // Content of the provided QR code image
+// No hardcoded constants - all data comes from the database via API
+
+// === TOAST & CONFIRM SYSTEM ===
+type ToastType = 'success' | 'error' | 'info';
+interface ToastItem { id: number; message: string; type: ToastType; }
+
+const ToastContext = createContext<{
+  showToast: (message: string, type?: ToastType) => void;
+  showConfirm: (message: string, onConfirm: () => void) => void;
+}>({ showToast: () => {}, showConfirm: () => {} });
+
+function useToast() { return useContext(ToastContext); }
+
+function ToastProvider({ children }: { children: React.ReactNode }) {
+  const [toasts, setToasts] = useState<ToastItem[]>([]);  
+  const [confirmState, setConfirmState] = useState<{ message: string; onConfirm: () => void } | null>(null);
+
+  const showToast = useCallback((message: string, type: ToastType = 'info') => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3500);
+  }, []);
+
+  const showConfirm = useCallback((message: string, onConfirm: () => void) => {
+    setConfirmState({ message, onConfirm });
+  }, []);
+
+  return (
+    <ToastContext.Provider value={{ showToast, showConfirm }}>
+      {children}
+
+      {/* Toast notifications */}
+      <div className="fixed top-4 right-4 z-[200] space-y-2 max-w-sm">
+        <AnimatePresence>
+          {toasts.map(toast => (
+            <motion.div
+              key={toast.id}
+              initial={{ opacity: 0, x: 50, scale: 0.95 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 50, scale: 0.95 }}
+              className={`px-4 py-3 rounded-xl shadow-lg border flex items-start gap-3 ${
+                toast.type === 'success' ? 'bg-green-50 border-green-200 text-green-800' :
+                toast.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' :
+                'bg-white border-slate-200 text-slate-800'
+              }`}
+            >
+              {toast.type === 'success' && <CheckCircle2 size={18} className="text-green-500 mt-0.5 flex-shrink-0" />}
+              {toast.type === 'error' && <AlertCircle size={18} className="text-red-500 mt-0.5 flex-shrink-0" />}
+              {toast.type === 'info' && <AlertCircle size={18} className="text-blue-500 mt-0.5 flex-shrink-0" />}
+              <span className="text-sm font-medium">{toast.message}</span>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {/* Confirm dialog */}
+      <AnimatePresence>
+        {confirmState && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setConfirmState(null)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl relative z-10 space-y-4"
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 bg-red-50 rounded-full flex items-center justify-center flex-shrink-0">
+                  <AlertCircle size={20} className="text-red-500" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-800">Konfirmasi</h3>
+                  <p className="text-sm text-slate-600 mt-1 whitespace-pre-line">{confirmState.message}</p>
+                </div>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setConfirmState(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-600 font-bold text-sm hover:bg-slate-50 transition-colors"
+                >
+                  Batal
+                </button>
+                <button
+                  onClick={() => { confirmState.onConfirm(); setConfirmState(null); }}
+                  className="flex-1 py-2.5 rounded-xl bg-red-600 text-white font-bold text-sm hover:bg-red-700 transition-colors"
+                >
+                  Hapus
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </ToastContext.Provider>
+  );
+}
 
 export default function App() {
   const [view, setView] = useState<'employee' | 'admin-login' | 'admin-dashboard'>('employee');
 
   return (
+    <ToastProvider>
     <div className="min-h-screen bg-[#F8F9FA] font-sans text-slate-900">
       <AnimatePresence mode="wait">
         {view === 'employee' && (
@@ -28,6 +129,7 @@ export default function App() {
         )}
       </AnimatePresence>
     </div>
+    </ToastProvider>
   );
 }
 
@@ -39,11 +141,22 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
   const [isLate, setIsLate] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [wrongQrDetected, setWrongQrDetected] = useState(false);
+  const scannerRef = useRef<QrScanner | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const wrongQrTimerRef = useRef<number | null>(null);
   const [hasCheckedIn, setHasCheckedIn] = useState(false);
   const [hasCheckedOut, setHasCheckedOut] = useState(false);
   const [attendanceData, setAttendanceData] = useState<AttendanceData[]>([]);
   const [loading, setLoading] = useState(false);
   const [presensiType, setPresensiType] = useState<'masuk' | 'pulang'>('masuk');
+
+  // Data dari database (bukan hardcode)
+  const [employees, setEmployees] = useState<string[]>([]);
+  const [locations, setLocations] = useState<string[]>([]);
+  const [shifts, setShifts] = useState<Record<string, { start_time: string; end_time: string; is_overtime: boolean }>>({});
+  const [settings, setSettings] = useState<AppSettings>({ barcode_content: '', late_threshold_minutes: '6' });
 
   const parseDateStr = (dateVal: any): string => {
     if (!dateVal) return '';
@@ -80,6 +193,12 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
 
   useEffect(() => {
     fetchData();
+    // Fetch master data dari database
+    api.getEmployees().then(data => setEmployees(data.filter(e => e.status === 'AKTIF').map(e => e.name)));
+    api.getLocations().then(data => setLocations(data));
+    api.getShifts().then(data => setShifts(data));
+    api.getSettings().then(data => setSettings(data));
+
     const handleFocus = () => fetchData();
     window.addEventListener('focus', handleFocus);
     return () => window.removeEventListener('focus', handleFocus);
@@ -117,13 +236,11 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       setShift(completedRecord.Shift as Shift || '');
       setHasCheckedIn(true);
       setHasCheckedOut(true);
-      setPresensiType('pulang');
     } else if (checkInRecord) {
       setLocation(checkInRecord.Location || '');
       setShift(checkInRecord.Shift as Shift || '');
       setHasCheckedIn(true);
       setHasCheckedOut(false);
-      setPresensiType('pulang');
     } else {
       setHasCheckedIn(false);
       setHasCheckedOut(false);
@@ -134,11 +251,12 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
   }, [name, attendanceData, loading]);
 
   useEffect(() => {
-    if (shift && shift !== 'SHIFT LEMBUR' && shift !== 'SHIFT OFFICE' && !hasCheckedIn && presensiType === 'masuk') {
-      const shiftStartTimeStr = SHIFTS[shift];
+    if (shift && !hasCheckedIn && presensiType === 'masuk') {
+      const shiftData = shifts[shift];
+      if (!shiftData?.start_time || shiftData.is_overtime) { setIsLate(false); return; }
       const now = new Date();
-      const shiftStartTime = parse(shiftStartTimeStr, 'HH:mm', now);
-      const lateThreshold = addMinutes(shiftStartTime, 6);
+      const shiftStartTime = parse(shiftData.start_time, 'HH:mm', now);
+      const lateThreshold = addMinutes(shiftStartTime, parseInt(settings.late_threshold_minutes) || 6);
       
       if (isAfter(now, lateThreshold)) {
         setIsLate(true);
@@ -150,53 +268,112 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       setIsLate(false);
       setNote('');
     }
-  }, [shift, hasCheckedIn, presensiType]);
+  }, [shift, hasCheckedIn, presensiType, shifts, settings]);
 
   const startScanner = async () => {
     setIsScanning(true);
     setTimeout(async () => {
-      const html5QrCode = new Html5Qrcode("reader");
+      if (!videoRef.current) {
+        setIsScanning(false);
+        setScanResult({ success: false, message: 'Video element tidak siap. Coba ulangi.' });
+        return;
+      }
       try {
-        await html5QrCode.start(
-          { facingMode: "environment" }, 
+        const qrScanner = new QrScanner(
+          videoRef.current,
+          (result) => {
+            // Validasi dulu — kalau bukan QR yang benar, JANGAN stop scanner
+            const scanned = result.data.trim().toUpperCase();
+            const expected = (settings.barcode_content || 'KOPERASI GIAT').trim().toUpperCase();
+            const isValid = scanned === expected ||
+                           (scanned.includes("KOPERASI") && scanned.includes("GIAT")) ||
+                           scanned.includes("KOPERASIGIAT") ||
+                           scanned.startsWith("KOPERASI");
+
+            if (!isValid) {
+              // Tampilkan peringatan sementara, scanner tetap jalan
+              setWrongQrDetected(true);
+              if (wrongQrTimerRef.current) window.clearTimeout(wrongQrTimerRef.current);
+              wrongQrTimerRef.current = window.setTimeout(() => {
+                setWrongQrDetected(false);
+              }, 2000);
+              return;
+            }
+
+            // QR benar — stop scanner dan proses
+            qrScanner.stop();
+            qrScanner.destroy();
+            scannerRef.current = null;
+            setWrongQrDetected(false);
+            setIsScanning(false);
+            handleScan(result.data);
+          },
           {
-            fps: 10,
-            qrbox: { width: 250, height: 250 },
-          },
-          (decodedText) => {
-            html5QrCode.stop().then(() => {
-              setIsScanning(false);
-              handleScan(decodedText);
-            }).catch(err => {
-              console.error("Failed to stop scanner", err);
-              setIsScanning(false);
-            });
-          },
-          (errorMessage) => {}
+            preferredCamera: 'environment',
+            highlightScanRegion: false,
+            highlightCodeOutline: false,
+            maxScansPerSecond: 30,
+            calculateScanRegion: (video) => ({
+              x: 0,
+              y: 0,
+              width: video.videoWidth,
+              height: video.videoHeight,
+            }),
+          }
         );
+        scannerRef.current = qrScanner;
+        await qrScanner.start();
       } catch (err) {
         console.error("Unable to start scanning", err);
+        scannerRef.current = null;
         setIsScanning(false);
-        alert("Gagal mengakses kamera. Pastikan izin kamera diberikan dan perangkat memiliki kamera belakang.");
+        setScanResult({ success: false, message: 'Gagal mengakses kamera. Pastikan izin kamera diberikan dan perangkat memiliki kamera belakang.' });
       }
-    }, 300);
+    }, 100);
+  };
+
+  const stopScanner = async () => {
+    if (scannerRef.current) {
+      try {
+        scannerRef.current.stop();
+        scannerRef.current.destroy();
+      } catch (e) {
+        // ignore
+      }
+      scannerRef.current = null;
+    }
+    if (wrongQrTimerRef.current) {
+      window.clearTimeout(wrongQrTimerRef.current);
+      wrongQrTimerRef.current = null;
+    }
+    setWrongQrDetected(false);
+    setIsScanning(false);
   };
 
   const handleScan = async (content: string) => {
     const scannedContent = content.trim().toUpperCase();
-    const expectedContent = OFFICIAL_BARCODE_CONTENT.trim().toUpperCase();
+    const expectedContent = (settings.barcode_content || 'KOPERASI GIAT').trim().toUpperCase();
     
     const isMatch = scannedContent === expectedContent || 
                    (scannedContent.includes("KOPERASI") && scannedContent.includes("GIAT")) ||
                    scannedContent.includes("KOPERASIGIAT") || 
                    scannedContent.startsWith("KOPERASI");
 
-    if (isMatch) {
-      const now = new Date();
-      let data: Partial<AttendanceData>;
-      
-      if (presensiType === 'masuk') {
-        data = {
+    if (!isMatch) {
+      setScanResult({ 
+        success: false, 
+        message: 'Barcode tidak dikenali. Harap scan barcode Koperasi Giat yang resmi.' 
+      });
+      return;
+    }
+
+    // ⚡ Tampilkan loading INSTANT saat QR terdeteksi
+    setIsProcessing(true);
+
+    const now = new Date();
+    const isCheckIn = presensiType === 'masuk';
+    const data: Partial<AttendanceData> = isCheckIn
+      ? {
           Date: format(now, 'yyyy-MM-dd'),
           Name: name,
           Location: location,
@@ -204,37 +381,31 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
           TimeIn: format(now, 'HH.mm'),
           Status: isLate ? 'Terlambat' : 'Tepat Waktu',
           Note: note
-        };
-      } else {
-        data = {
+        }
+      : {
           Date: format(now, 'yyyy-MM-dd'),
           Name: name,
           Shift: shift as Shift,
           TimeOut: format(now, 'HH.mm')
         };
-      }
 
-      try {
-        const result = await api.saveAttendance(data);
-        if (result.success) {
-          const successMsg = presensiType === 'masuk' 
-            ? (isLate ? 'PRESENSI MASUK BERHASIL (TERLAMBAT)' : 'PRESENSI MASUK SUKSES') 
-            : 'PRESENSI PULANG SUKSES';
-          setScanResult({ success: true, message: successMsg });
-          if (presensiType === 'masuk') setHasCheckedIn(true);
-          if (presensiType === 'pulang') setHasCheckedOut(true);
-          fetchData(); 
-        } else {
-          setScanResult({ success: false, message: result.message || 'Gagal menyimpan data' });
-        }
-      } catch (e) {
-        setScanResult({ success: false, message: 'Gagal menghubungi server. Periksa koneksi internet.' });
+    try {
+      const result = await api.saveAttendance(data);
+      setIsProcessing(false);
+      if (result.success) {
+        const successMsg = isCheckIn 
+          ? (isLate ? 'Presensi masuk berhasil (Terlambat)' : 'Presensi masuk berhasil') 
+          : 'Presensi pulang berhasil';
+        setScanResult({ success: true, message: successMsg });
+        if (isCheckIn) setHasCheckedIn(true);
+        else setHasCheckedOut(true);
+        fetchData();
+      } else {
+        setScanResult({ success: false, message: result.message || 'Gagal menyimpan data' });
       }
-    } else {
-      setScanResult({ 
-        success: false, 
-        message: `Barcode salah.\nTerbaca: "${content}"\nHarap scan barcode Koperasi Giat yang resmi.` 
-      });
+    } catch (e) {
+      setIsProcessing(false);
+      setScanResult({ success: false, message: 'Gagal menghubungi server. Periksa koneksi internet.' });
     }
   };
 
@@ -305,11 +476,11 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
               className="w-full p-3.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none"
             >
               <option value="">Pilih Nama Pegawai</option>
-              {EMPLOYEES.map(e => <option key={e} value={e}>{e}</option>)}
+              {employees.map(e => <option key={e} value={e}>{e}</option>)}
             </select>
           </div>
 
-          <div className="flex gap-4">
+          <div className="flex flex-col sm:flex-row gap-4">
             <div className="flex-1">
               <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Lokasi Kerja</label>
               <select 
@@ -319,7 +490,7 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
                 className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
               >
                 <option value="">Pilih Lokasi</option>
-                {LOCATIONS.map(l => <option key={l} value={l}>{l}</option>)}
+                {locations.map(l => <option key={l} value={l}>{l}</option>)}
               </select>
             </div>
 
@@ -332,8 +503,19 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
                 className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
               >
                 <option value="">Pilih Shift</option>
-                {Object.keys(SHIFTS).map(s => <option key={s} value={s}>{s}</option>)}
+                {Object.entries(shifts).map(([s, t]) => {
+                  const times = t as { start_time: string; end_time: string };
+                  return <option key={s} value={s}>{s} ({times.start_time} – {times.end_time})</option>;
+                })}
               </select>
+              {shift && shifts[shift] && (
+                <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
+                  <ClockIcon size={12} className="text-[#B21B1B]" />
+                  <span className="font-bold text-slate-700">{shifts[shift].start_time}</span>
+                  <span className="text-slate-400">–</span>
+                  <span className="font-bold text-slate-700">{shifts[shift].end_time}</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -451,39 +633,108 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
 
       {/* Scanner Popup */}
       {isScanning && (
-        <div className="fixed inset-0 bg-black/80 z-50 flex flex-col items-center justify-center p-6">
-          <div id="reader" className="w-full max-w-sm bg-white rounded-2xl overflow-hidden"></div>
+        <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-6">
+          <div className="w-full max-w-sm bg-black rounded-2xl overflow-hidden relative aspect-square">
+            <video ref={videoRef} className="w-full h-full object-cover" />
+            {/* Overlay kotak target */}
+            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+              <div className={`w-3/4 h-3/4 relative transition-colors ${wrongQrDetected ? 'opacity-80' : ''}`}>
+                <div className={`absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 rounded-tl-lg ${wrongQrDetected ? 'border-red-500' : 'border-white'}`}></div>
+                <div className={`absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 rounded-tr-lg ${wrongQrDetected ? 'border-red-500' : 'border-white'}`}></div>
+                <div className={`absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 rounded-bl-lg ${wrongQrDetected ? 'border-red-500' : 'border-white'}`}></div>
+                <div className={`absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 rounded-br-lg ${wrongQrDetected ? 'border-red-500' : 'border-white'}`}></div>
+              </div>
+            </div>
+            {/* Banner peringatan kalau QR salah */}
+            {wrongQrDetected && (
+              <motion.div 
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="absolute top-3 left-3 right-3 bg-red-500/95 text-white px-4 py-2.5 rounded-xl shadow-lg flex items-center gap-2 text-sm font-medium"
+              >
+                <AlertCircle size={16} />
+                QR code tidak valid
+              </motion.div>
+            )}
+          </div>
+          <p className="text-white/80 text-sm font-medium mt-4 text-center">
+            {wrongQrDetected ? 'Coba scan QR Koperasi Giat yang resmi' : 'Arahkan kamera ke QR code'}
+          </p>
           <button 
-            onClick={() => setIsScanning(false)}
-            className="mt-6 px-8 py-3 bg-white text-slate-900 rounded-full font-bold shadow-lg"
+            onClick={stopScanner}
+            className="mt-6 px-8 py-3 bg-white text-slate-900 rounded-full font-bold shadow-lg active:scale-95 transition-transform"
           >
             BATAL
           </button>
         </div>
       )}
 
+      {/* Processing Popup */}
+      {isProcessing && (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-6 backdrop-blur-sm">
+          <motion.div 
+            initial={{ scale: 0.85, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl"
+          >
+            <div className="h-2 bg-[#B21B1B]" />
+            <div className="p-8 text-center space-y-5">
+              <div className="w-20 h-20 mx-auto rounded-full bg-slate-50 flex items-center justify-center">
+                <div className="w-10 h-10 border-4 border-[#B21B1B] border-t-transparent rounded-full animate-spin"></div>
+              </div>
+              <div>
+                <h3 className="text-lg font-extrabold text-slate-800">Memproses...</h3>
+                <p className="text-sm text-slate-500 mt-2">QR code terdeteksi. Menyimpan data presensi.</p>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
       {/* Result Popup */}
       {scanResult && (
-        <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-6 backdrop-blur-sm">
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-6 backdrop-blur-sm">
           <motion.div 
-            initial={{ scale: 0.9, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            className="bg-white rounded-3xl p-8 w-full max-w-xs text-center space-y-4 shadow-2xl"
+            initial={{ scale: 0.85, opacity: 0, y: 20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+            className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl"
           >
-            {scanResult.success ? (
-              <CheckCircle2 size={64} className="mx-auto text-green-500" />
-            ) : (
-              <AlertCircle size={64} className="mx-auto text-red-500" />
-            )}
-            <h3 className={`text-xl font-bold ${scanResult.success ? 'text-green-600' : 'text-red-600'}`}>
-              {scanResult.message}
-            </h3>
-            <button 
-              onClick={() => setScanResult(null)}
-              className="w-full py-3 bg-slate-900 text-white rounded-xl font-bold"
-            >
-              OK
-            </button>
+            {/* Header colored bar */}
+            <div className={`h-2 ${scanResult.success ? 'bg-green-500' : 'bg-red-500'}`} />
+            
+            <div className="p-8 text-center space-y-5">
+              {/* Icon */}
+              <div className={`w-20 h-20 mx-auto rounded-full flex items-center justify-center ${scanResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
+                {scanResult.success ? (
+                  <CheckCircle2 size={40} className="text-green-500" />
+                ) : (
+                  <X size={40} className="text-red-500" />
+                )}
+              </div>
+
+              {/* Title */}
+              <div>
+                <h3 className={`text-lg font-extrabold ${scanResult.success ? 'text-green-700' : 'text-red-700'}`}>
+                  {scanResult.success ? 'Berhasil!' : 'Gagal'}
+                </h3>
+                <p className="text-sm text-slate-500 mt-2 leading-relaxed">
+                  {scanResult.message}
+                </p>
+              </div>
+
+              {/* Button */}
+              <button 
+                onClick={() => setScanResult(null)}
+                className={`w-full py-3.5 rounded-xl font-bold text-white transition-all active:scale-95 ${
+                  scanResult.success 
+                    ? 'bg-green-600 hover:bg-green-700 shadow-lg shadow-green-600/20' 
+                    : 'bg-slate-800 hover:bg-slate-900 shadow-lg shadow-slate-800/20'
+                }`}
+              >
+                OK
+              </button>
+            </div>
           </motion.div>
         </div>
       )}
@@ -503,11 +754,11 @@ function AdminLogin({ onLoginSuccess, onBack }: { onLoginSuccess: () => void; on
     setLoading(true);
     setError('');
     try {
-      const config = await api.getAdminConfig();
-      if (idInput === config.id && password === config.password) {
+      const result = await api.login(idInput, password);
+      if (result.success) {
         onLoginSuccess();
       } else {
-        setError('ID atau Password salah');
+        setError(result.message || 'ID atau Password salah');
       }
     } catch (e) {
       setError('Gagal menghubungkan ke server');
@@ -589,8 +840,8 @@ function AdminLogin({ onLoginSuccess, onBack }: { onLoginSuccess: () => void; on
 }
 
 function AdminDashboard({ onLogout }: { onLogout: () => void }) {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'employees' | 'settings'>('dashboard');
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const { showToast } = useToast();
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'employees' | 'master-data' | 'settings'>('dashboard');
   const [isDesktopCollapsed, setIsDesktopCollapsed] = useState(false);
   const [attendanceData, setAttendanceData] = useState<AttendanceData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -601,10 +852,16 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   const [startDate, setStartDate] = useState(format(subDays(new Date(), 5), 'yyyy-MM-dd'));
   const [endDate, setEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [historyPage, setHistoryPage] = useState(1);
+  const HISTORY_PAGE_SIZE = 10;
 
   // Settings
   const [newId, setNewId] = useState('');
   const [newPassword, setNewPassword] = useState('');
+
+  const handleLogout = async () => {
+    await api.logout();
+    onLogout();
+  };
 
   useEffect(() => {
     fetchData();
@@ -686,53 +943,18 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   };
 
   const handleUpdateAdmin = async () => {
-    if (!newId || !newPassword) return alert('ID dan Password tidak boleh kosong');
-    await api.updateAdminConfig({ id: newId, password: newPassword });
-    alert('Admin updated. Logging out...');
-    onLogout();
+    if (!newId || !newPassword) { showToast('ID dan Password tidak boleh kosong', 'error'); return; }
+    const result = await api.updateAdminConfig({ id: newId, password: newPassword });
+    if (result.success) {
+      showToast('Kredensial admin berhasil diubah. Silakan login ulang.', 'success');
+      setTimeout(() => handleLogout(), 1500);
+    } else {
+      showToast(result.message || 'Gagal mengubah kredensial', 'error');
+    }
   };
 
   return (
     <div className="flex min-h-screen bg-[#F8F9FA]">
-      {/* Sidebar */}
-      <AnimatePresence>
-        {isSidebarOpen && (
-          <>
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsSidebarOpen(false)}
-              className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-40 lg:hidden"
-            />
-            <motion.div 
-              initial={{ x: '-100%' }} animate={{ x: 0 }} exit={{ x: '-100%' }} transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="fixed inset-y-0 left-0 w-72 bg-white text-slate-800 z-50 p-6 flex flex-col shadow-2xl lg:hidden border-r border-slate-200"
-            >
-              <div className="flex items-center justify-between mb-10 pb-6 border-b border-slate-100">
-                <img src="https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png" alt="Logo" className="h-12 drop-shadow-sm" />
-                <button onClick={() => setIsSidebarOpen(false)} className="p-2 text-slate-400 hover:bg-slate-100 rounded-full transition-colors"><X size={20} /></button>
-              </div>
-
-              <nav className="flex-1 space-y-2">
-                <SidebarItem icon={<BarChart3 size={20} />} label="Dashboard Utama" active={activeTab === 'dashboard'} onClick={() => { setActiveTab('dashboard'); setIsSidebarOpen(false); }} />
-                <SidebarItem icon={<History size={20} />} label="Riwayat Presensi" active={activeTab === 'history'} onClick={() => { setActiveTab('history'); setIsSidebarOpen(false); }} />
-                <SidebarItem icon={<User size={20} />} label="Data Pegawai" active={activeTab === 'employees'} onClick={() => { setActiveTab('employees'); setIsSidebarOpen(false); }} />
-                <SidebarItem icon={<Settings size={20} />} label="Pengaturan" active={activeTab === 'settings'} onClick={() => { setActiveTab('settings'); setIsSidebarOpen(false); }} />
-              </nav>
-
-              <button 
-                onClick={onLogout}
-                className="mt-auto flex items-center justify-center gap-3 p-4 bg-white/10 text-white hover:bg-white/20 rounded-xl transition-all font-bold"
-              >
-                <LogOut size={20} />
-                KELUAR
-              </button>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-
       {/* Desktop Sidebar */}
       <motion.div 
         animate={{ width: isDesktopCollapsed ? 88 : 288 }}
@@ -766,11 +988,12 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           <SidebarItem collapsed={isDesktopCollapsed} icon={<BarChart3 size={22} />} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
           <SidebarItem collapsed={isDesktopCollapsed} icon={<History size={22} />} label="Riwayat Presensi" active={activeTab === 'history'} onClick={() => setActiveTab('history')} />
           <SidebarItem collapsed={isDesktopCollapsed} icon={<User size={22} />} label="Data Pegawai" active={activeTab === 'employees'} onClick={() => setActiveTab('employees')} />
+          <SidebarItem collapsed={isDesktopCollapsed} icon={<Database size={22} />} label="Master Data" active={activeTab === 'master-data'} onClick={() => setActiveTab('master-data')} />
           <SidebarItem collapsed={isDesktopCollapsed} icon={<Settings size={22} />} label="Pengaturan" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
         </nav>
 
         <button 
-          onClick={onLogout}
+          onClick={handleLogout}
           className={`mt-auto flex items-center gap-3 p-4 bg-transparent text-red-500 hover:bg-red-50 rounded-xl transition-all font-bold ${isDesktopCollapsed ? 'justify-center' : ''}`}
         >
           <LogOut size={20} className="min-w-[20px]" />
@@ -780,16 +1003,15 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-30 shadow-sm">
-          <div className="flex items-center gap-4">
-            <button onClick={() => setIsSidebarOpen(true)} className="lg:hidden p-2 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors">
-              <Menu size={24} />
-            </button>
-            <div className="lg:hidden flex items-center gap-2">
-              <span className="font-extrabold text-[#B21B1B]">Koperasi GIAT</span>
-            </div>
+        <header className="bg-white border-b border-slate-200 px-4 lg:px-6 py-3 lg:py-4 flex items-center justify-between sticky top-0 z-30 shadow-sm">
+          <div className="flex items-center gap-3">
+            <img src="https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png" alt="Logo" className="h-8 lg:hidden" />
+            <span className="font-extrabold text-[#B21B1B] lg:hidden text-sm">Koperasi GIAT</span>
           </div>
           <div className="flex items-center gap-4">
+            <button onClick={handleLogout} className="lg:hidden p-2 hover:bg-red-50 rounded-lg text-red-500 transition-colors" title="Logout">
+              <LogOut size={20} />
+            </button>
             <div className="flex items-center gap-3 pl-4">
                <div className="text-right hidden sm:block">
                  <div className="text-sm font-bold text-slate-800">Admin Koperasi</div>
@@ -802,7 +1024,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           </div>
         </header>
 
-        <main className="flex-1 p-4 md:p-8 overflow-y-auto">
+        <main className="flex-1 p-4 md:p-8 overflow-y-auto pb-24 lg:pb-8">
           {loading ? (
             <div className="flex flex-col items-center justify-center py-32 space-y-4">
               <div className="w-12 h-12 border-4 border-[#B21B1B] border-t-transparent rounded-full animate-spin"></div>
@@ -916,11 +1138,10 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                             <th className="px-6 py-4">Datang</th>
                             <th className="px-6 py-4">Pulang</th>
                             <th className="px-6 py-4">Status</th>
-                            <th className="px-6 py-4">Aksi</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-50">
-                          {filteredHistory.slice((historyPage - 1) * 5, historyPage * 5).map((d, i) => (
+                          {filteredHistory.slice((historyPage - 1) * HISTORY_PAGE_SIZE, historyPage * HISTORY_PAGE_SIZE).map((d, i) => (
                             <tr key={i} className="hover:bg-slate-50/50 transition-colors text-sm group">
                               <td className="px-6 py-4 text-slate-500 font-medium">{d.Date}</td>
                               <td className="px-6 py-4 font-bold text-slate-800">{d.Name}</td>
@@ -933,15 +1154,10 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                                   {d.Status}
                                 </span>
                               </td>
-                              <td className="px-6 py-4">
-                                <button className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors">
-                                  <Eye size={18} />
-                                </button>
-                              </td>
                             </tr>
                           ))}
                           {filteredHistory.length === 0 && (
-                            <tr><td colSpan={8} className="px-6 py-12 text-center text-slate-400 font-medium">Tidak ada data untuk periode ini.</td></tr>
+                            <tr><td colSpan={7} className="px-6 py-12 text-center text-slate-400 font-medium">Tidak ada data untuk periode ini.</td></tr>
                           )}
                         </tbody>
                       </table>
@@ -949,7 +1165,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                     {filteredHistory.length > 0 && (
                       <div className="p-6 border-t border-slate-100 flex items-center justify-between bg-white">
                         <div className="text-sm font-medium text-slate-500">
-                          Menampilkan {((historyPage - 1) * 5) + 1}-{Math.min(historyPage * 5, filteredHistory.length)} dari {filteredHistory.length} entri
+                          Menampilkan {((historyPage - 1) * HISTORY_PAGE_SIZE) + 1}-{Math.min(historyPage * HISTORY_PAGE_SIZE, filteredHistory.length)} dari {filteredHistory.length} entri
                         </div>
                         <div className="flex items-center gap-2">
                           <button 
@@ -959,7 +1175,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                           >
                             <ChevronRight size={16} className="rotate-180" />
                           </button>
-                          {Array.from({ length: Math.ceil(filteredHistory.length / 5) }).map((_, i) => (
+                          {Array.from({ length: Math.ceil(filteredHistory.length / HISTORY_PAGE_SIZE) }).map((_, i) => (
                             <button
                               key={i}
                               onClick={() => setHistoryPage(i + 1)}
@@ -971,7 +1187,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                             </button>
                           ))}
                           <button 
-                            disabled={historyPage === Math.ceil(filteredHistory.length / 5)}
+                            disabled={historyPage === Math.ceil(filteredHistory.length / HISTORY_PAGE_SIZE)}
                             onClick={() => setHistoryPage(p => p + 1)}
                             className="w-8 h-8 flex items-center justify-center rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 disabled:opacity-50"
                           >
@@ -986,6 +1202,10 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
 
               {activeTab === 'employees' && (
                 <EmployeeStatsView attendanceData={attendanceData} />
+              )}
+
+              {activeTab === 'master-data' && (
+                <MasterDataView />
               )}
 
               {activeTab === 'settings' && (
@@ -1050,6 +1270,17 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
         </main>
       </div>
 
+      {/* Mobile Bottom Navigation */}
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-40 shadow-[0_-4px_20px_rgba(0,0,0,0.06)]">
+        <nav className="flex items-center justify-around px-2 py-2">
+          <BottomNavItem icon={<BarChart3 size={20} />} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
+          <BottomNavItem icon={<History size={20} />} label="Riwayat" active={activeTab === 'history'} onClick={() => setActiveTab('history')} />
+          <BottomNavItem icon={<User size={20} />} label="Pegawai" active={activeTab === 'employees'} onClick={() => setActiveTab('employees')} />
+          <BottomNavItem icon={<Database size={20} />} label="Master" active={activeTab === 'master-data'} onClick={() => setActiveTab('master-data')} />
+          <BottomNavItem icon={<Settings size={20} />} label="Setting" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
+        </nav>
+      </div>
+
       {/* Popups */}
       <AnimatePresence>
         {showPresentPopup && (
@@ -1105,6 +1336,24 @@ function SidebarItem({ icon, label, active, onClick, collapsed = false }: { icon
   );
 }
 
+function BottomNavItem({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl transition-all min-w-[56px] ${
+        active 
+          ? 'text-[#B21B1B]' 
+          : 'text-slate-400'
+      }`}
+    >
+      <div className={`p-1.5 rounded-lg transition-all ${active ? 'bg-red-50' : ''}`}>
+        {icon}
+      </div>
+      <span className={`text-[9px] font-bold ${active ? 'text-[#B21B1B]' : 'text-slate-400'}`}>{label}</span>
+    </button>
+  );
+}
+
 function SummaryCard({ label, count, color, onClick }: { label: string; count: number; color: 'green' | 'red'; onClick: () => void }) {
   const isGreen = color === 'green';
   return (
@@ -1154,40 +1403,507 @@ function Modal({ title, children, onClose }: { title: string; children: React.Re
   );
 }
 
+function TimePicker({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  const [hour = '08', minute = '00'] = value.split(':');
+  return (
+    <div className="flex-1">
+      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">{label}</label>
+      <div className="flex gap-2 items-center">
+        <div className="relative flex-1">
+          <select
+            value={hour}
+            onChange={e => onChange(`${e.target.value}:${minute}`)}
+            className="w-full pl-3 pr-7 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none appearance-none cursor-pointer"
+          >
+            {Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0')).map(h => (
+              <option key={h} value={h}>{h}</option>
+            ))}
+          </select>
+          <ChevronRight size={14} className="absolute right-2 top-1/2 -translate-y-1/2 rotate-90 pointer-events-none opacity-50" />
+        </div>
+        <span className="font-bold text-slate-400">:</span>
+        <div className="relative flex-1">
+          <select
+            value={minute}
+            onChange={e => onChange(`${hour}:${e.target.value}`)}
+            className="w-full pl-3 pr-7 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none appearance-none cursor-pointer"
+          >
+            {['00', '15', '30', '45'].map(m => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <ChevronRight size={14} className="absolute right-2 top-1/2 -translate-y-1/2 rotate-90 pointer-events-none opacity-50" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MasterDataView() {
+  const { showToast, showConfirm } = useToast();
+  const [subTab, setSubTab] = useState<'employees' | 'locations' | 'shifts'>('employees');
+  const [employees, setEmployees] = useState<{name: string, status: string}[]>([]);
+  const [locations, setLocations] = useState<string[]>([]);
+  const [shifts, setShifts] = useState<Record<string, { start_time: string; end_time: string; is_overtime: boolean }>>({});
+  const [loading, setLoading] = useState(true);
+
+  // Form states
+  const [newEmpName, setNewEmpName] = useState('');
+  const [newLocation, setNewLocation] = useState('');
+  const [newShiftName, setNewShiftName] = useState('');
+  const [newShiftTime, setNewShiftTime] = useState('08:00');
+  const [newShiftEndTime, setNewShiftEndTime] = useState('17:00');
+  const [newShiftIsOvertime, setNewShiftIsOvertime] = useState(false);
+
+  // Edit shift (hanya jam, tidak mengubah nama)
+  const [editingShift, setEditingShift] = useState<string | null>(null);
+  const [editShiftStart, setEditShiftStart] = useState('08:00');
+  const [editShiftEnd, setEditShiftEnd] = useState('17:00');
+  const [editShiftIsOvertime, setEditShiftIsOvertime] = useState(false);
+
+  const fetchAll = async () => {
+    setLoading(true);
+    const [empData, locData, shiftData] = await Promise.all([
+      api.getEmployees(),
+      api.getLocations(),
+      api.getShifts()
+    ]);
+    setEmployees(empData);
+    setLocations(locData);
+    setShifts(shiftData);
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchAll(); }, []);
+
+  // === EMPLOYEE HANDLERS ===
+  const handleAddEmployee = async () => {
+    if (!newEmpName.trim()) return;
+    const result = await api.addEmployee({ name: newEmpName.trim(), status: 'AKTIF' });
+    if (result.success) {
+      setNewEmpName('');
+      showToast('Pegawai berhasil ditambahkan', 'success');
+      fetchAll();
+    } else {
+      showToast(result.message || 'Gagal menambahkan pegawai', 'error');
+    }
+  };
+
+  const handleUpdateEmployeeStatus = async (name: string, status: string) => {
+    await api.updateEmployee(name, status);
+    fetchAll();
+  };
+
+  const handleDeleteEmployee = async (name: string) => {
+    showConfirm(`Hapus pegawai "${name}"?\n\nData absensi yang sudah tercatat TETAP tersimpan di riwayat.`, async () => {
+      const result = await api.deleteEmployee(name);
+      if (result.message) showToast(result.message, 'info');
+      fetchAll();
+    });
+  };
+
+  // === LOCATION HANDLERS ===
+  const handleAddLocation = async () => {
+    if (!newLocation.trim()) return;
+    const result = await api.addLocation(newLocation.trim());
+    if (result.success) {
+      setNewLocation('');
+      showToast('Lokasi berhasil ditambahkan', 'success');
+      fetchAll();
+    } else {
+      showToast(result.message || 'Gagal menambahkan lokasi', 'error');
+    }
+  };
+
+  const handleDeleteLocation = async (name: string) => {
+    showConfirm(`Hapus lokasi "${name}"?\n\nData absensi yang sudah tercatat TETAP tersimpan di riwayat.`, async () => {
+      const result = await api.deleteLocation(name);
+      if (result.message) showToast(result.message, 'info');
+      fetchAll();
+    });
+  };
+
+  // === SHIFT HANDLERS ===
+  const handleAddShift = async () => {
+    if (!newShiftName.trim() || !newShiftTime || !newShiftEndTime) return;
+    const result = await api.addShift(newShiftName.trim(), newShiftTime, newShiftEndTime, newShiftIsOvertime);
+    if (result.success) {
+      setNewShiftName('');
+      setNewShiftTime('08:00');
+      setNewShiftEndTime('17:00');
+      setNewShiftIsOvertime(false);
+      showToast('Shift berhasil ditambahkan', 'success');
+      fetchAll();
+    } else {
+      showToast(result.message || 'Gagal menambahkan shift', 'error');
+    }
+  };
+
+  const handleStartEditShift = (name: string, startTime: string, endTime: string, isOvertime: boolean) => {
+    setEditingShift(name);
+    setEditShiftStart(startTime);
+    setEditShiftEnd(endTime);
+    setEditShiftIsOvertime(isOvertime);
+  };
+
+  const handleSaveEditShift = async () => {
+    if (!editingShift) return;
+    const result = await api.updateShift(editingShift, editShiftStart, editShiftEnd, editShiftIsOvertime);
+    if (result.success) {
+      showToast('Shift berhasil diperbarui', 'success');
+      setEditingShift(null);
+      fetchAll();
+    } else {
+      showToast(result.message || 'Gagal memperbarui shift', 'error');
+    }
+  };
+
+  const handleDeleteShift = async (name: string) => {
+    showConfirm(`Hapus shift "${name}"?\n\nData absensi yang sudah tercatat TETAP tersimpan di riwayat.`, async () => {
+      const result = await api.deleteShift(name);
+      if (result.message) showToast(result.message, 'info');
+      fetchAll();
+    });
+  };
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-32 space-y-4">
+        <div className="w-12 h-12 border-4 border-[#B21B1B] border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-[#B21B1B] font-bold tracking-widest animate-pulse text-sm">MEMUAT DATA...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="mb-8">
+        <h2 className="text-2xl font-black text-slate-800">Master Data</h2>
+        <p className="text-slate-500 text-sm mt-1">Kelola data pegawai, lokasi kerja, dan waktu shift.</p>
+      </div>
+
+      {/* Sub-tab switcher */}
+      <div className="flex bg-slate-100 p-1 sm:p-1.5 rounded-xl">
+        <button
+          className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 sm:gap-2 ${subTab === 'employees' ? 'bg-[#B21B1B] text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          onClick={() => setSubTab('employees')}
+        >
+          <User size={14} className="sm:w-4 sm:h-4" /> Pegawai
+        </button>
+        <button
+          className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 sm:gap-2 ${subTab === 'locations' ? 'bg-[#B21B1B] text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          onClick={() => setSubTab('locations')}
+        >
+          <MapPin size={14} className="sm:w-4 sm:h-4" /> Lokasi
+        </button>
+        <button
+          className={`flex-1 py-2.5 sm:py-3 text-xs sm:text-sm font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 sm:gap-2 ${subTab === 'shifts' ? 'bg-[#B21B1B] text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          onClick={() => setSubTab('shifts')}
+        >
+          <ClockIcon size={14} className="sm:w-4 sm:h-4" /> Shift
+        </button>
+      </div>
+
+      {/* === PEGAWAI === */}
+      {subTab === 'employees' && (
+        <div className="space-y-6">
+          {/* Form tambah */}
+          <div className="bg-white p-4 sm:p-6 rounded-3xl shadow-sm border border-slate-100">
+            <h3 className="font-extrabold text-slate-800 mb-4">Tambah Pegawai Baru</h3>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                type="text"
+                value={newEmpName}
+                onChange={e => setNewEmpName(e.target.value)}
+                placeholder="Nama pegawai"
+                className="flex-1 p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none"
+              />
+              <button onClick={handleAddEmployee} className="px-6 py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap">
+                <Plus size={16} /> Tambah
+              </button>
+            </div>
+          </div>
+
+          {/* Daftar pegawai - desktop table, mobile cards */}
+          <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
+            <div className="p-4 sm:p-6 border-b border-slate-100">
+              <h3 className="font-extrabold text-slate-800">Daftar Pegawai ({employees.length})</h3>
+            </div>
+
+            {/* Mobile card view */}
+            <div className="sm:hidden divide-y divide-slate-50">
+              {employees.map((emp, i) => (
+                <div key={emp.name} className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-slate-50/50">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <span className="text-slate-400 text-xs font-medium w-5 flex-shrink-0">{i + 1}</span>
+                    <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0">
+                      <User size={16} className="text-slate-500" />
+                    </div>
+                    <span className="font-bold text-slate-800 truncate">{emp.name}</span>
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <div className="relative">
+                      <select
+                        value={emp.status}
+                        onChange={e => handleUpdateEmployeeStatus(emp.name, e.target.value)}
+                        className={`pl-2.5 pr-6 py-1 rounded-lg text-[10px] font-bold border-0 outline-none cursor-pointer appearance-none ${
+                          emp.status === 'AKTIF' ? 'bg-green-50 text-green-600' :
+                          emp.status === 'CUTI' ? 'bg-yellow-50 text-yellow-600' :
+                          'bg-red-50 text-red-600'
+                        }`}
+                      >
+                        <option value="AKTIF">AKTIF</option>
+                        <option value="CUTI">CUTI</option>
+                        <option value="NONAKTIF">NONAKTIF</option>
+                      </select>
+                      <ChevronRight size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 rotate-90 pointer-events-none opacity-50" />
+                    </div>
+                    <button onClick={() => handleDeleteEmployee(emp.name)} className="p-1.5 hover:bg-red-50 rounded-lg text-red-400">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {employees.length === 0 && (
+                <div className="px-6 py-12 text-center text-slate-400 text-sm">Belum ada data pegawai.</div>
+              )}
+            </div>
+
+            {/* Desktop table view */}
+            <div className="hidden sm:block overflow-x-auto">
+              <table className="w-full text-left">
+                <thead className="bg-slate-50 text-slate-400 text-[10px] uppercase tracking-widest font-bold">
+                  <tr>
+                    <th className="px-6 py-4">#</th>
+                    <th className="px-6 py-4">Nama</th>
+                    <th className="px-6 py-4">Status</th>
+                    <th className="px-6 py-4">Aksi</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {employees.map((emp, i) => (
+                    <tr key={emp.name} className="hover:bg-slate-50/50 transition-colors text-sm">
+                      <td className="px-6 py-4 text-slate-400">{i + 1}</td>
+                      <td className="px-6 py-4 font-bold text-slate-800">{emp.name}</td>
+                      <td className="px-6 py-4">
+                        <div className="relative inline-block">
+                          <select
+                            value={emp.status}
+                            onChange={e => handleUpdateEmployeeStatus(emp.name, e.target.value)}
+                            className={`pl-3 pr-7 py-1.5 rounded-lg text-xs font-bold border-0 outline-none cursor-pointer appearance-none ${
+                              emp.status === 'AKTIF' ? 'bg-green-50 text-green-600' :
+                              emp.status === 'CUTI' ? 'bg-yellow-50 text-yellow-600' :
+                              'bg-red-50 text-red-600'
+                            }`}
+                          >
+                            <option value="AKTIF">AKTIF</option>
+                            <option value="CUTI">CUTI</option>
+                            <option value="NONAKTIF">NONAKTIF</option>
+                          </select>
+                          <ChevronRight size={12} className="absolute right-2 top-1/2 -translate-y-1/2 rotate-90 pointer-events-none opacity-50" />
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <button onClick={() => handleDeleteEmployee(emp.name)} className="p-2 hover:bg-red-50 rounded-lg text-red-400 hover:text-red-600 transition-colors" title="Hapus">
+                          <Trash2 size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {employees.length === 0 && (
+                    <tr><td colSpan={4} className="px-6 py-12 text-center text-slate-400">Belum ada data pegawai.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === LOKASI === */}
+      {subTab === 'locations' && (
+        <div className="space-y-6">
+          {/* Form tambah */}
+          <div className="bg-white p-4 sm:p-6 rounded-3xl shadow-sm border border-slate-100">
+            <h3 className="font-extrabold text-slate-800 mb-4">Tambah Lokasi Baru</h3>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                type="text"
+                value={newLocation}
+                onChange={e => setNewLocation(e.target.value)}
+                placeholder="Nama lokasi kerja"
+                className="flex-1 p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none"
+              />
+              <button onClick={handleAddLocation} className="px-6 py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap">
+                <Plus size={16} /> Tambah
+              </button>
+            </div>
+          </div>
+
+          {/* List lokasi */}
+          <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
+            <div className="p-4 sm:p-6 border-b border-slate-100">
+              <h3 className="font-extrabold text-slate-800">Daftar Lokasi ({locations.length})</h3>
+            </div>
+            <div className="divide-y divide-slate-50">
+              {locations.map((loc, i) => (
+                <div key={loc} className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 hover:bg-slate-50/50 transition-colors gap-2">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <span className="text-slate-400 text-xs font-medium w-5 sm:w-8 flex-shrink-0">{i + 1}</span>
+                    <div className="w-9 h-9 sm:w-10 sm:h-10 bg-blue-50 rounded-xl flex items-center justify-center text-blue-500 flex-shrink-0">
+                      <MapPin size={18} />
+                    </div>
+                    <span className="font-bold text-slate-800 truncate">{loc}</span>
+                  </div>
+                  <button onClick={() => handleDeleteLocation(loc)} className="p-2 hover:bg-red-50 rounded-lg text-red-400 hover:text-red-600 transition-colors flex-shrink-0" title="Hapus">
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+              {locations.length === 0 && (
+                <div className="px-6 py-12 text-center text-slate-400 text-sm">Belum ada data lokasi.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === SHIFT === */}
+      {subTab === 'shifts' && (
+        <div className="space-y-6">
+          {/* Form tambah */}
+          <div className="bg-white p-4 sm:p-6 rounded-3xl shadow-sm border border-slate-100">
+            <h3 className="font-extrabold text-slate-800 mb-4">Tambah Shift Baru</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">Nama Shift</label>
+                <input
+                  type="text"
+                  value={newShiftName}
+                  onChange={e => setNewShiftName(e.target.value)}
+                  placeholder="Contoh: SHIFT PAGI 06.00-14.00"
+                  className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <TimePicker label="Jam Mulai" value={newShiftTime} onChange={setNewShiftTime} />
+                <TimePicker label="Jam Selesai" value={newShiftEndTime} onChange={setNewShiftEndTime} />
+              </div>
+              <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 cursor-pointer hover:bg-slate-100 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={newShiftIsOvertime}
+                  onChange={e => setNewShiftIsOvertime(e.target.checked)}
+                  className="w-5 h-5 rounded text-[#B21B1B] focus:ring-[#B21B1B]/20 cursor-pointer"
+                />
+                <div className="flex-1">
+                  <div className="text-sm font-bold text-slate-800">Tandai sebagai shift lembur</div>
+                  <div className="text-xs text-slate-500">Shift ini tidak akan dicek keterlambatannya & dihitung sebagai lembur di statistik</div>
+                </div>
+              </label>
+              <button onClick={handleAddShift} className="w-full py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all active:scale-95 flex items-center justify-center gap-2">
+                <Plus size={16} /> Tambah Shift
+              </button>
+            </div>
+          </div>
+
+          {/* List shift */}
+          <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
+            <div className="p-4 sm:p-6 border-b border-slate-100">
+              <h3 className="font-extrabold text-slate-800">Daftar Shift ({Object.keys(shifts).length})</h3>
+            </div>
+            <div className="divide-y divide-slate-50">
+              {(Object.entries(shifts) as [string, { start_time: string; end_time: string; is_overtime: boolean }][]).map(([name, times], i) => (
+                <div key={name} className="px-4 sm:px-6 py-4 hover:bg-slate-50/50 transition-colors">
+                  {editingShift === name ? (
+                    /* === EDIT MODE === */
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <span className="text-slate-400 text-sm font-medium w-6 sm:w-8 flex-shrink-0">{i + 1}</span>
+                        <div className="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center text-purple-500 flex-shrink-0">
+                          <ClockIcon size={18} />
+                        </div>
+                        <span className="font-bold text-slate-800 truncate">{name}</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:pl-14">
+                        <TimePicker label="Jam Mulai" value={editShiftStart} onChange={setEditShiftStart} />
+                        <TimePicker label="Jam Selesai" value={editShiftEnd} onChange={setEditShiftEnd} />
+                      </div>
+                      <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 cursor-pointer sm:ml-14">
+                        <input
+                          type="checkbox"
+                          checked={editShiftIsOvertime}
+                          onChange={e => setEditShiftIsOvertime(e.target.checked)}
+                          className="w-5 h-5 rounded text-[#B21B1B] focus:ring-[#B21B1B]/20 cursor-pointer"
+                        />
+                        <span className="text-sm font-medium text-slate-700">Shift lembur</span>
+                      </label>
+                      <div className="flex gap-2 sm:pl-14">
+                        <button onClick={handleSaveEditShift} className="flex-1 py-2.5 bg-green-600 text-white rounded-xl font-bold text-sm hover:bg-green-700 transition-colors">
+                          Simpan
+                        </button>
+                        <button onClick={() => setEditingShift(null)} className="flex-1 py-2.5 border border-slate-200 text-slate-600 rounded-xl font-bold text-sm hover:bg-slate-50 transition-colors">
+                          Batal
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* === VIEW MODE === */
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <span className="text-slate-400 text-sm font-medium w-6 sm:w-8 flex-shrink-0">{i + 1}</span>
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${times.is_overtime ? 'bg-orange-50 text-orange-500' : 'bg-purple-50 text-purple-500'}`}>
+                          <ClockIcon size={18} />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-slate-800 truncate">{name}</span>
+                            {times.is_overtime && (
+                              <span className="text-[9px] font-bold text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded uppercase tracking-wider">Lembur</span>
+                            )}
+                          </div>
+                          <span className="text-xs text-slate-400">{times.start_time} – {times.end_time}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <button onClick={() => handleStartEditShift(name, times.start_time, times.end_time, times.is_overtime)} className="p-2 hover:bg-blue-50 rounded-lg text-blue-400 hover:text-blue-600 transition-colors" title="Edit">
+                          <Edit2 size={16} />
+                        </button>
+                        <button onClick={() => handleDeleteShift(name)} className="p-2 hover:bg-red-50 rounded-lg text-red-400 hover:text-red-600 transition-colors" title="Hapus">
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {Object.keys(shifts).length === 0 && (
+                <div className="px-6 py-12 text-center text-slate-400">Belum ada data shift.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[] }) {
   const [viewState, setViewState] = useState<'grid' | 'stats'>('grid');
   const [selectedEmployee, setSelectedEmployee] = useState<string | null>(null);
   const [startDate, setStartDate] = useState(format(subDays(new Date(), 30), 'yyyy-MM-dd'));
   const [endDate, setEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [searchQuery, setSearchQuery] = useState('');
-  const [showAddEmployeePopup, setShowAddEmployeePopup] = useState(false);
-  const [newEmployeeName, setNewEmployeeName] = useState('');
-  const [addedEmployees, setAddedEmployees] = useState<{name: string, role: string, status: string, contract: string}[]>([]);
+  const [employeeList, setEmployeeList] = useState<{name: string, status: string}[]>([]);
+  const [shiftMap, setShiftMap] = useState<Record<string, { is_overtime: boolean }>>({});
 
-  // Generate employee list from attendance data
-  const employeesMap = new Map();
-  attendanceData.forEach(d => {
-    if (!employeesMap.has(d.Name)) {
-      const len = d.Name.length;
-      const role = len % 3 === 0 ? 'Manager Operasional' : (len % 2 === 0 ? 'Staff Administrasi' : 'Koordinator Lapangan');
-      const empStatus = len % 7 === 0 ? 'CUTI' : 'AKTIF';
-      const contractStatus = len % 5 === 0 ? 'Kontrak' : (len % 4 === 0 ? 'Magang' : 'Staff Tetap');
-      employeesMap.set(d.Name, {
-        name: d.Name,
-        role: role,
-        status: empStatus,
-        contract: contractStatus
-      });
-    }
-  });
+  // Fetch employees & shifts dari database
+  useEffect(() => {
+    api.getEmployees().then(data => setEmployeeList(data));
+    api.getShifts().then(data => setShiftMap(data));
+  }, []);
 
-  addedEmployees.forEach(emp => {
-    if (!employeesMap.has(emp.name)) {
-      employeesMap.set(emp.name, emp);
-    }
-  });
-  
-  const allEmployees = Array.from(employeesMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+  const allEmployees = employeeList.sort((a, b) => a.name.localeCompare(b.name));
   const activeEmployees = allEmployees;
   const displayEmployees = activeEmployees
     .filter(e => e.name.toLowerCase().includes(searchQuery.toLowerCase()));
@@ -1207,20 +1923,27 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
 
   const totalPresent = stats.length;
   const totalLate = stats.filter(d => d.Status === 'Terlambat').length;
-  const overtimeData = stats.filter(d => d.Shift === 'SHIFT LEMBUR');
+  // Lembur dihitung dari shift yang punya flag is_overtime = true
+  const overtimeData = stats.filter(d => shiftMap[d.Shift]?.is_overtime === true);
 
 
   if (viewState === 'stats') {
+    const attendanceRate = totalPresent > 0 ? Math.round(((totalPresent - totalLate) / totalPresent) * 100) : 0;
+
     return (
       <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-200 pb-4">
           <button onClick={() => setViewState('grid')} className="flex items-center gap-2 text-slate-600 font-bold text-lg hover:text-[#B21B1B] transition-colors">
             <ArrowLeft size={20} /> Statistik Pegawai
           </button>
-          <div className="flex items-center gap-4">
-            <div className="text-right hidden sm:block">
-              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Periode Data</div>
-              <div className="text-xs font-bold text-slate-700">14 April - 13 Mei 2026</div>
+          <div className="flex items-center gap-3">
+            <div>
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Dari</label>
+              <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-[#B21B1B]/20" />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Sampai</label>
+              <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-[#B21B1B]/20" />
             </div>
           </div>
         </div>
@@ -1229,37 +1952,31 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
           <div className="md:col-span-1 bg-white p-6 rounded-3xl border border-slate-100 shadow-sm flex items-center gap-4">
             <div className="w-16 h-16 rounded-full bg-slate-200 overflow-hidden relative border-2 border-white shadow-sm flex-shrink-0">
                <User className="w-full h-full text-slate-400 p-2 bg-slate-100" />
-               <div className="absolute bottom-0 right-0 w-4 h-4 bg-green-500 rounded-full border-2 border-white"></div>
             </div>
             <div>
               <h3 className="font-extrabold text-slate-800 text-lg leading-tight">{selectedEmployee}</h3>
-              <p className="text-xs text-[#B21B1B] font-medium mt-1">Operasional</p>
             </div>
           </div>
           <div className="md:col-span-1 bg-white p-6 rounded-3xl border-t-4 border-t-green-500 shadow-sm flex flex-col justify-center items-center text-center">
             <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Kehadiran</div>
             <div className="text-4xl font-black text-slate-800">{totalPresent}</div>
-            <div className="text-[10px] text-green-500 font-bold mt-1 bg-green-50 px-2 py-0.5 rounded flex items-center gap-1"><CheckCircle2 size={10} /> 94.4% Rate</div>
+            <div className="text-[10px] text-green-500 font-bold mt-1 bg-green-50 px-2 py-0.5 rounded flex items-center gap-1"><CheckCircle2 size={10} /> {attendanceRate}% Tepat Waktu</div>
           </div>
           <div className="md:col-span-1 bg-white p-6 rounded-3xl border-t-4 border-t-[#B21B1B] shadow-sm flex flex-col justify-center items-center text-center">
             <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Terlambat</div>
             <div className="text-4xl font-black text-slate-800">{totalLate}</div>
-            <div className="text-[10px] text-[#B21B1B] font-bold mt-1 bg-red-50 px-2 py-0.5 rounded flex items-center gap-1"><AlertCircle size={10} /> 1x Sanksi</div>
+            <div className="text-[10px] text-[#B21B1B] font-bold mt-1 bg-red-50 px-2 py-0.5 rounded flex items-center gap-1"><AlertCircle size={10} /> {totalLate}x Tercatat</div>
           </div>
           <div className="md:col-span-1 bg-white p-6 rounded-3xl border-t-4 border-t-blue-500 shadow-sm flex flex-col justify-center items-center text-center">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Lembur (Jam)</div>
-            <div className="text-4xl font-black text-slate-800">{overtimeData.length * 2}</div>
-            <div className="text-[10px] text-slate-500 font-bold mt-1 bg-slate-100 px-2 py-0.5 rounded flex items-center gap-1"><History size={10} /> {overtimeData.length}x Jam</div>
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Lembur</div>
+            <div className="text-4xl font-black text-slate-800">{overtimeData.length}</div>
+            <div className="text-[10px] text-blue-500 font-bold mt-1 bg-blue-50 px-2 py-0.5 rounded flex items-center gap-1"><History size={10} /> {overtimeData.length}x Shift</div>
           </div>
         </div>
 
         <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
-          <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white">
-            <h3 className="font-extrabold text-slate-800 text-lg">Detail Pelanggaran & Lembur</h3>
-            <div className="relative w-full sm:w-auto">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input type="text" placeholder="Cari tanggal..." className="w-full sm:w-64 pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-[#B21B1B]/50 focus:ring-1 focus:ring-[#B21B1B]/50 transition-all" />
-            </div>
+          <div className="p-6 border-b border-slate-100 bg-white">
+            <h3 className="font-extrabold text-slate-800 text-lg">Riwayat Kehadiran</h3>
           </div>
           
           <div className="overflow-x-auto">
@@ -1267,45 +1984,33 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
               <thead className="bg-white text-slate-400 text-[10px] uppercase tracking-widest font-bold border-b border-slate-100">
                 <tr>
                   <th className="px-6 py-4">Tanggal</th>
-                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Shift</th>
                   <th className="px-6 py-4">Waktu Masuk</th>
-                  <th className="px-6 py-4">Waktu Keluar</th>
-                  <th className="px-6 py-4">Keterangan</th>
-                  <th className="px-6 py-4 text-center">Aksi</th>
+                  <th className="px-6 py-4">Waktu Pulang</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Catatan</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
-                {stats.filter(d => d.Status === 'Terlambat' || d.Shift === 'SHIFT LEMBUR').map((d, i) => (
+                {stats.map((d, i) => (
                   <tr key={i} className="hover:bg-slate-50/50 transition-colors">
                     <td className="px-6 py-4 text-sm font-bold text-slate-800">{d.Date}</td>
+                    <td className="px-6 py-4 text-sm text-slate-500">{d.Shift}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600 font-medium">{d.TimeIn || '-'}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600 font-medium">{d.TimeOut || '-'}</td>
                     <td className="px-6 py-4">
-                       <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider inline-block ${d.Shift === 'SHIFT LEMBUR' ? 'bg-blue-50 text-blue-600 border border-blue-100' : 'bg-red-50 text-red-600 border border-red-100'}`}>
-                        {d.Shift === 'SHIFT LEMBUR' ? 'LEMBUR (1 JAM)' : `TERLAMBAT (0.5J)`}
+                       <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider inline-block ${d.Status === 'Terlambat' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                        {d.Status}
                       </span>
                     </td>
-                    <td className="px-6 py-4 text-sm text-slate-600 font-medium">{d.TimeIn}</td>
-                    <td className="px-6 py-4 text-sm text-slate-600 font-medium">{d.TimeOut || '17:00'}</td>
-                    <td className="px-6 py-4 text-sm text-slate-500 italic">{d.Shift === 'SHIFT LEMBUR' ? 'Update stok gudang' : `Alasan: ${d.Note || 'Macet'}`}</td>
-                    <td className="px-6 py-4 text-center">
-                      <button className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors">
-                        <Edit2 size={16} />
-                      </button>
-                    </td>
+                    <td className="px-6 py-4 text-sm text-slate-500 italic">{d.Note || '-'}</td>
                   </tr>
                 ))}
-                {stats.filter(d => d.Status === 'Terlambat' || d.Shift === 'SHIFT LEMBUR').length === 0 && (
-                  <tr><td colSpan={6} className="px-6 py-12 text-center text-slate-400 font-medium italic">Tidak ada catatan khusus pada periode ini.</td></tr>
+                {stats.length === 0 && (
+                  <tr><td colSpan={6} className="px-6 py-12 text-center text-slate-400 font-medium italic">Tidak ada data kehadiran pada periode ini.</td></tr>
                 )}
               </tbody>
             </table>
-          </div>
-          <div className="p-4 border-t border-slate-100 flex items-center justify-between bg-slate-50/50 text-xs text-slate-500">
-            <span>Menampilkan data 30 hari terakhir</span>
-            <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200">
-               <ChevronRight size={14} className="rotate-180 text-slate-300" />
-               <span className="font-bold text-slate-700">Halaman 1 dari 1</span>
-               <ChevronRight size={14} className="text-slate-300" />
-            </div>
           </div>
         </div>
       </motion.div>
@@ -1318,15 +2023,8 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 border-b border-slate-200 pb-6">
         <div>
           <h2 className="text-2xl font-black text-slate-800">Data Pegawai</h2>
-          <p className="text-slate-500 text-sm mt-1">Kelola informasi dan tinjau kinerja tim Koperasi GIAT secara mendalam.</p>
+          <p className="text-slate-500 text-sm mt-1">Tinjau kinerja tim Koperasi GIAT secara mendalam.</p>
         </div>
-        <button 
-          onClick={() => setShowAddEmployeePopup(true)} 
-          className="bg-[#B21B1B] text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-[#901515] transition-all shadow-lg shadow-red-900/20 active:scale-95 whitespace-nowrap"
-        >
-          <Plus size={20} />
-          Tambah Pegawai
-        </button>
       </div>
 
       <div className="flex flex-col md:flex-row gap-4 items-stretch">
@@ -1365,12 +2063,11 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
               </div>
             </div>
             <h4 className="font-extrabold text-slate-800 text-lg line-clamp-1 w-full px-2" title={emp.name}>{emp.name}</h4>
-            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1 mb-6">{emp.role}</p>
+            <span className={`text-[10px] font-bold uppercase tracking-widest mt-2 mb-6 px-2 py-1 rounded-md ${emp.status === 'AKTIF' ? 'bg-green-50 text-green-500' : emp.status === 'CUTI' ? 'bg-orange-50 text-orange-500' : 'bg-red-50 text-red-500'}`}>
+              {emp.status}
+            </span>
             
-            <div className="w-full flex items-center justify-between pt-4 border-t border-slate-100 mt-auto">
-              <span className={`text-[9px] font-black tracking-widest px-2 py-1 rounded-md uppercase ${emp.status === 'CUTI' ? 'bg-orange-50 text-orange-500' : 'bg-green-50 text-green-500'}`}>
-                {emp.status}
-              </span>
+            <div className="w-full flex items-center justify-end pt-4 border-t border-slate-100 mt-auto">
               <button 
                 onClick={() => { setSelectedEmployee(emp.name); setViewState('stats'); }}
                 className="text-[10px] font-bold text-[#B21B1B] hover:text-red-900 transition-colors flex items-center gap-1 group-hover:underline"
@@ -1390,42 +2087,6 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
           Muat Lebih Banyak <ChevronRight size={14} className="rotate-90" />
         </button>
       </div>
-
-      <AnimatePresence>
-        {showAddEmployeePopup && (
-          <Modal title="Tambah Pegawai" onClose={() => setShowAddEmployeePopup(false)}>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Nama Pegawai</label>
-                <input 
-                  type="text" 
-                  value={newEmployeeName}
-                  onChange={(e) => setNewEmployeeName(e.target.value)}
-                  className="w-full p-4 rounded-xl border border-slate-200 bg-slate-50 focus:ring-2 focus:ring-[#B21B1B]/20 outline-none transition-all text-sm"
-                  placeholder="Masukkan nama pegawai"
-                />
-              </div>
-              <button 
-                onClick={() => {
-                  if (newEmployeeName.trim()) {
-                    setAddedEmployees([...addedEmployees, {
-                      name: newEmployeeName.trim().toUpperCase(),
-                      role: 'Staff',
-                      status: 'AKTIF',
-                      contract: 'Staff Tetap'
-                    }]);
-                    setNewEmployeeName('');
-                    setShowAddEmployeePopup(false);
-                  }
-                }}
-                className="w-full py-4 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all shadow-lg shadow-red-900/20 active:scale-95"
-              >
-                SIMPAN
-              </button>
-            </div>
-          </Modal>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
