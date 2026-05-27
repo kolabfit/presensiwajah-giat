@@ -1,4 +1,4 @@
-import { AttendanceData, AdminConfig, Employee, AppSettings } from '../types';
+import { AttendanceData, AdminConfig, Employee, AppSettings, AttendancePhoto } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
@@ -69,12 +69,35 @@ export const api = {
 
   // === Attendance ===
   async saveAttendance(data: Partial<AttendanceData>) {
-    const res = await fetch(`${API_URL}/attendance`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data })
-    });
-    return await res.json();
+    try {
+      const res = await fetch(`${API_URL}/attendance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data })
+      });
+      const text = await res.text();
+      let payload: { success?: boolean; message?: string } = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch (e) {
+        payload = {};
+      }
+
+      if (!res.ok) {
+        return {
+          success: false,
+          message: payload.message || 'Presensi belum berhasil disimpan. Silakan coba lagi.'
+        };
+      }
+
+      return payload;
+    } catch (e) {
+      console.error(e);
+      return {
+        success: false,
+        message: 'Tidak bisa terhubung ke server presensi. Periksa koneksi lalu coba lagi.'
+      };
+    }
   },
 
   async getAttendanceHistory(): Promise<AttendanceData[]> {
@@ -85,6 +108,26 @@ export const api = {
       console.error(e);
       return [];
     }
+  },
+
+  async getAttendancePhotos(): Promise<AttendancePhoto[]> {
+    try {
+      const res = await fetch(`${API_URL}/attendance/photos`, {
+        headers: getAuthHeaders()
+      });
+      return await res.json();
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  },
+
+  async deleteAttendancePhoto(attendanceId: number, type: 'masuk' | 'pulang') {
+    const res = await fetch(`${API_URL}/attendance/photos/${attendanceId}/${type}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders()
+    });
+    return await res.json();
   },
 
   // === Employees ===
@@ -103,6 +146,48 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
+    });
+    return await res.json();
+  },
+
+  async getEmployeeByQr(qrCode: string): Promise<{ success: boolean; message?: string; employee?: Employee }> {
+    try {
+      const cleanQrCode = qrCode.trim();
+      if (!cleanQrCode) {
+        return { success: false, message: 'QR tidak terbaca. Arahkan kamera ke QR pegawai sampai terlihat jelas.' };
+      }
+
+      const res = await fetch(`${API_URL}/employees/qr/${encodeURIComponent(cleanQrCode)}`);
+      const text = await res.text();
+      let data: { success?: boolean; message?: string; employee?: Employee } = {};
+
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (e) {
+        data = {};
+      }
+
+      if (!res.ok) {
+        return {
+          success: false,
+          message: data.message || (res.status === 404
+            ? 'QR pegawai tidak ditemukan. Pastikan QR berasal dari daftar pegawai aplikasi ini.'
+            : 'QR belum bisa diperiksa. Silakan coba scan ulang.')
+        };
+      }
+
+      return data as { success: boolean; message?: string; employee?: Employee };
+    } catch (e) {
+      console.error(e);
+      return { success: false, message: 'Tidak bisa terhubung ke server. Periksa koneksi lalu coba lagi.' };
+    }
+  },
+
+  async saveEmployeeQrImage(name: string, qrDataUrl: string) {
+    const res = await fetch(`${API_URL}/employees/${encodeURIComponent(name)}/qr-image`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ qrDataUrl })
     });
     return await res.json();
   },

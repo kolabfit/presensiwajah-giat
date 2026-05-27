@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogIn, User, ShieldCheck, LogOut, Menu, X, ChevronRight, BarChart3, History, Settings, Download, Eye, EyeOff, Camera, CheckCircle2, AlertCircle, Plus, Upload, Search, Filter, ArrowLeft, MoreHorizontal, Edit2, Trash2, MapPin, Clock as ClockIcon, Database } from 'lucide-react';
+import { LogIn, User, ShieldCheck, LogOut, Menu, X, ChevronRight, BarChart3, History, Settings, Download, Eye, EyeOff, Camera, CheckCircle2, AlertCircle, Plus, Upload, Search, Filter, ArrowLeft, MoreHorizontal, Edit2, Trash2, MapPin, Clock as ClockIcon, Database, QrCode, Image as ImageIcon } from 'lucide-react';
 import Clock from './components/Clock';
-import { Shift, AttendanceData, Employee, AppSettings } from './types';
+import { Shift, AttendanceData, Employee, AppSettings, AttendancePhoto } from './types';
 import { api } from './services/api';
-import { format, isAfter, addMinutes, parse, startOfDay, subDays, isWithinInterval } from 'date-fns';
+import { format, isAfter, addMinutes, startOfDay, subDays, isWithinInterval } from 'date-fns';
 import QrScanner from 'qr-scanner';
+import QRCodeStyling from 'qr-code-styling';
 import * as XLSX from 'xlsx';
 
 // No hardcoded constants - all data comes from the database via API
+const GIAT_LOGO_URL = 'https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png';
 
 // === TOAST & CONFIRM SYSTEM ===
 type ToastType = 'success' | 'error' | 'info';
@@ -20,6 +22,172 @@ const ToastContext = createContext<{
 }>({ showToast: () => {}, showConfirm: () => {} });
 
 function useToast() { return useContext(ToastContext); }
+
+function fileToDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function createStyledQr(qrCode: string) {
+  return new QRCodeStyling({
+    width: 320,
+    height: 320,
+    type: 'canvas',
+    data: qrCode,
+    image: GIAT_LOGO_URL,
+    margin: 10,
+    qrOptions: {
+      errorCorrectionLevel: 'H'
+    },
+    dotsOptions: {
+      type: 'rounded',
+      color: '#111827'
+    },
+    cornersSquareOptions: {
+      type: 'extra-rounded',
+      color: '#B21B1B'
+    },
+    cornersDotOptions: {
+      type: 'dot',
+      color: '#003366'
+    },
+    backgroundOptions: {
+      color: '#FFFFFF'
+    },
+    imageOptions: {
+      margin: 5,
+      imageSize: 0.28,
+      crossOrigin: 'anonymous',
+      hideBackgroundDots: true
+    }
+  });
+}
+
+async function createStyledQrDataUrl(qrCode: string) {
+  const qr = createStyledQr(qrCode);
+  const raw = await qr.getRawData('png');
+  if (!raw || !(raw instanceof Blob)) {
+    throw new Error('Gagal membuat gambar QR');
+  }
+  return await blobToDataUrl(raw);
+}
+
+function QrWithLogo({ qrCode, employeeName, sizeClass = 'w-14 h-14', onClick }: { qrCode?: string; employeeName: string; sizeClass?: string; onClick?: () => void }) {
+  const qrRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!qrCode || !qrRef.current) return;
+
+    qrRef.current.innerHTML = '';
+    const qr = createStyledQr(qrCode);
+
+    qr.append(qrRef.current);
+  }, [qrCode]);
+
+  if (!qrCode) return <span className="text-slate-300">-</span>;
+
+  return (
+    <div
+      onClick={onClick}
+      className={`rounded-lg border border-slate-200 bg-white p-1 overflow-hidden flex items-center justify-center ${sizeClass} ${onClick ? 'cursor-zoom-in hover:ring-2 hover:ring-[#B21B1B]/30' : ''}`}
+      title={`QR ${employeeName}`}
+      aria-label={`QR ${employeeName}`}
+    >
+      <div ref={qrRef} className="w-full h-full [&_canvas]:!w-full [&_canvas]:!h-full" />
+    </div>
+  );
+}
+
+function EvidencePhoto({ src, alt, className, onClick }: { src?: string; alt: string; className: string; onClick?: () => void }) {
+  const [failed, setFailed] = useState(false);
+  const [isLoading, setIsLoading] = useState(Boolean(src));
+
+  useEffect(() => {
+    setFailed(false);
+    setIsLoading(Boolean(src));
+  }, [src]);
+
+  if (!src || failed) {
+    return (
+      <div className={`${className} bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-300`}>
+        <ImageIcon size={16} />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`relative overflow-hidden bg-slate-100 ${className} ${onClick ? 'cursor-zoom-in' : ''}`} onClick={onClick}>
+      {isLoading && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-100">
+          <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-slate-100 via-slate-200 to-slate-100" />
+          <div className="relative w-5 h-5 border-2 border-slate-300 border-t-[#B21B1B] rounded-full animate-spin" />
+        </div>
+      )}
+      <img
+        src={src}
+        alt={alt}
+        onLoad={() => setIsLoading(false)}
+        onError={() => { setIsLoading(false); setFailed(true); }}
+        className={`w-full h-full ${className.includes('object-contain') ? 'object-contain' : 'object-cover'} ${onClick ? 'hover:opacity-90 transition-opacity' : ''} ${isLoading ? 'opacity-0' : 'opacity-100'}`}
+      />
+    </div>
+  );
+}
+
+function HiddenToken({ value, compact = false }: { value?: string; compact?: boolean }) {
+  const [visible, setVisible] = useState(false);
+  if (!value) return <span className="text-slate-300">-</span>;
+
+  const masked = value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : '••••••••';
+
+  return (
+    <div className={`flex items-center gap-2 min-w-0 ${compact ? 'max-w-[180px]' : 'w-full'}`}>
+      <span className="text-[10px] font-mono text-slate-400 truncate min-w-0">
+        {visible ? value : masked}
+      </span>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setVisible(v => !v); }}
+        className="p-1 rounded-md text-slate-400 hover:text-[#B21B1B] hover:bg-red-50 flex-shrink-0"
+        title={visible ? 'Sembunyikan ID QR' : 'Tampilkan ID QR'}
+        aria-label={visible ? 'Sembunyikan ID QR' : 'Tampilkan ID QR'}
+      >
+        {visible ? <EyeOff size={13} /> : <Eye size={13} />}
+      </button>
+    </div>
+  );
+}
+
+function parseShiftTimeToToday(timeValue: string, baseDate: Date) {
+  const raw = String(timeValue || '').trim();
+  const match = raw.match(/^(\d{1,2})(?::|\.)(\d{2})(?:\s*([AP]M))?$/i) || raw.match(/^(\d{1,2})(?:\s*([AP]M))$/i);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2]?.length === 2 ? match[2] : 0);
+  const meridiem = (match[3] || match[2] || '').toUpperCase();
+
+  if (meridiem === 'PM' && hour < 12) hour += 12;
+  if (meridiem === 'AM' && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) return null;
+
+  const parsed = new Date(baseDate);
+  parsed.setHours(hour, minute, 0, 0);
+  return parsed;
+}
 
 function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);  
@@ -134,7 +302,6 @@ export default function App() {
 }
 
 function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
-  const [name, setName] = useState('');
   const [location, setLocation] = useState('');
   const [shift, setShift] = useState<Shift | ''>('');
   const [note, setNote] = useState('');
@@ -145,15 +312,20 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
   const [wrongQrDetected, setWrongQrDetected] = useState(false);
   const scannerRef = useRef<QrScanner | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const selfieVideoRef = useRef<HTMLVideoElement | null>(null);
+  const selfieStreamRef = useRef<MediaStream | null>(null);
   const wrongQrTimerRef = useRef<number | null>(null);
   const [hasCheckedIn, setHasCheckedIn] = useState(false);
   const [hasCheckedOut, setHasCheckedOut] = useState(false);
   const [attendanceData, setAttendanceData] = useState<AttendanceData[]>([]);
   const [loading, setLoading] = useState(false);
   const [presensiType, setPresensiType] = useState<'masuk' | 'pulang'>('masuk');
+  const [scannedEmployee, setScannedEmployee] = useState<Employee | null>(null);
+  const [isSelfieOpen, setIsSelfieOpen] = useState(false);
+  const [isSelfieReady, setIsSelfieReady] = useState(false);
 
   // Data dari database (bukan hardcode)
-  const [employees, setEmployees] = useState<string[]>([]);
+  const name = scannedEmployee?.name || '';
   const [locations, setLocations] = useState<string[]>([]);
   const [shifts, setShifts] = useState<Record<string, { start_time: string; end_time: string; is_overtime: boolean }>>({});
   const [settings, setSettings] = useState<AppSettings>({ barcode_content: '', late_threshold_minutes: '6' });
@@ -194,7 +366,6 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
   useEffect(() => {
     fetchData();
     // Fetch master data dari database
-    api.getEmployees().then(data => setEmployees(data.filter(e => e.status === 'AKTIF').map(e => e.name)));
     api.getLocations().then(data => setLocations(data));
     api.getShifts().then(data => setShifts(data));
     api.getSettings().then(data => setSettings(data));
@@ -216,7 +387,6 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       setHasCheckedOut(false);
       setLocation('');
       setShift('');
-      setPresensiType('masuk');
       return;
     }
 
@@ -244,18 +414,75 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
     } else {
       setHasCheckedIn(false);
       setHasCheckedOut(false);
-      setLocation('');
-      setShift('');
       setPresensiType('masuk');
     }
   }, [name, attendanceData, loading]);
 
+  const stopSelfieCamera = () => {
+    selfieStreamRef.current?.getTracks().forEach(track => track.stop());
+    selfieStreamRef.current = null;
+    if (selfieVideoRef.current) selfieVideoRef.current.srcObject = null;
+    setIsSelfieOpen(false);
+    setIsSelfieReady(false);
+  };
+
+  const startSelfieCamera = async () => {
+    setIsSelfieOpen(true);
+    setIsSelfieReady(false);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      selfieStreamRef.current = stream;
+      if (selfieVideoRef.current) {
+        selfieVideoRef.current.srcObject = stream;
+        await selfieVideoRef.current.play();
+        if (selfieVideoRef.current.videoWidth && selfieVideoRef.current.videoHeight) {
+          setIsSelfieReady(true);
+        }
+      }
+    } catch (e) {
+      setIsSelfieOpen(false);
+      setScanResult({ success: false, message: 'Gagal membuka kamera selfie. Pastikan izin kamera diberikan.' });
+    }
+  };
+
+  const getCurrentPosition = () => new Promise<GeolocationPosition | null>((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(resolve, () => resolve(null), {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 0
+    });
+  });
+
+  const captureSelfieDataUrl = () => {
+    const video = selfieVideoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) return '';
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.86);
+  };
+
+  const waitForSelfieFrame = async () => {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const video = selfieVideoRef.current;
+      if (video?.videoWidth && video?.videoHeight) return true;
+      await new Promise(resolve => setTimeout(resolve, 120));
+    }
+    return false;
+  };
+
   useEffect(() => {
     if (shift && !hasCheckedIn && presensiType === 'masuk') {
       const shiftData = shifts[shift];
-      if (!shiftData?.start_time || shiftData.is_overtime) { setIsLate(false); return; }
+      if (!shiftData?.start_time) { setIsLate(false); return; }
       const now = new Date();
-      const shiftStartTime = parse(shiftData.start_time, 'HH:mm', now);
+      const shiftStartTime = parseShiftTimeToToday(shiftData.start_time, now);
+      if (!shiftStartTime) { setIsLate(false); return; }
       const lateThreshold = addMinutes(shiftStartTime, parseInt(settings.late_threshold_minutes) || 6);
       
       if (isAfter(now, lateThreshold)) {
@@ -282,25 +509,6 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
         const qrScanner = new QrScanner(
           videoRef.current,
           (result) => {
-            // Validasi dulu — kalau bukan QR yang benar, JANGAN stop scanner
-            const scanned = result.data.trim().toUpperCase();
-            const expected = (settings.barcode_content || 'KOPERASI GIAT').trim().toUpperCase();
-            const isValid = scanned === expected ||
-                           (scanned.includes("KOPERASI") && scanned.includes("GIAT")) ||
-                           scanned.includes("KOPERASIGIAT") ||
-                           scanned.startsWith("KOPERASI");
-
-            if (!isValid) {
-              // Tampilkan peringatan sementara, scanner tetap jalan
-              setWrongQrDetected(true);
-              if (wrongQrTimerRef.current) window.clearTimeout(wrongQrTimerRef.current);
-              wrongQrTimerRef.current = window.setTimeout(() => {
-                setWrongQrDetected(false);
-              }, 2000);
-              return;
-            }
-
-            // QR benar — stop scanner dan proses
             qrScanner.stop();
             qrScanner.destroy();
             scannerRef.current = null;
@@ -351,24 +559,86 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
   };
 
   const handleScan = async (content: string) => {
-    const scannedContent = content.trim().toUpperCase();
-    const expectedContent = (settings.barcode_content || 'KOPERASI GIAT').trim().toUpperCase();
-    
-    const isMatch = scannedContent === expectedContent || 
-                   (scannedContent.includes("KOPERASI") && scannedContent.includes("GIAT")) ||
-                   scannedContent.includes("KOPERASIGIAT") || 
-                   scannedContent.startsWith("KOPERASI");
-
-    if (!isMatch) {
-      setScanResult({ 
-        success: false, 
-        message: 'Barcode tidak dikenali. Harap scan barcode Koperasi Giat yang resmi.' 
-      });
+    const scannedQr = content.trim();
+    if (!scannedQr) {
+      setScanResult({ success: false, message: 'QR tidak terbaca. Pastikan QR pegawai terlihat jelas di kamera, lalu scan ulang.' });
       return;
     }
 
-    // ⚡ Tampilkan loading INSTANT saat QR terdeteksi
     setIsProcessing(true);
+    try {
+      const result = await api.getEmployeeByQr(scannedQr);
+      setIsProcessing(false);
+      if (!result.success || !result.employee) {
+        setScanResult({ success: false, message: result.message || 'QR tidak cocok dengan data pegawai. Silakan scan QR pegawai yang benar.' });
+        return;
+      }
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      const todayRecords = attendanceData.filter(d => d.Name === result.employee?.name && parseDateStr(d.Date) === todayStr);
+      const openRecord = todayRecords.find(d => d.TimeIn && !d.TimeOut);
+      const doneRecord = todayRecords.find(d => d.TimeIn && d.TimeOut);
+
+      if (presensiType === 'masuk' && (openRecord || doneRecord)) {
+        setScanResult({ success: false, message: 'Pegawai ini sudah melakukan presensi masuk hari ini.' });
+        return;
+      }
+      if (presensiType === 'pulang' && !openRecord) {
+        setScanResult({ success: false, message: doneRecord ? 'Pegawai ini sudah presensi pulang hari ini.' : 'Data presensi masuk hari ini belum ditemukan.' });
+        return;
+      }
+      if (presensiType === 'pulang' && openRecord) {
+        setLocation(openRecord.Location || location);
+        setShift((openRecord.Shift as Shift) || shift);
+      }
+      setScannedEmployee(result.employee);
+      setScanResult(null);
+      setTimeout(() => startSelfieCamera(), 250);
+    } catch (e) {
+      setIsProcessing(false);
+      setScanResult({ success: false, message: 'QR belum bisa diperiksa. Silakan coba scan ulang beberapa saat lagi.' });
+    }
+  };
+
+  const processAttendance = async () => {
+    if (isProcessing) return;
+    if (!scannedEmployee) {
+      setScanResult({ success: false, message: 'Data pegawai belum terbaca. Silakan scan QR pegawai terlebih dahulu.' });
+      return;
+    }
+
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const openRecord = attendanceData.find(d =>
+      d.Name === scannedEmployee.name &&
+      parseDateStr(d.Date) === todayStr &&
+      d.TimeIn &&
+      !d.TimeOut
+    );
+    const attendanceLocation = presensiType === 'pulang' ? (location || openRecord?.Location || '') : location;
+    const attendanceShift = presensiType === 'pulang' ? ((shift || openRecord?.Shift || '') as Shift) : (shift as Shift);
+
+    if (!attendanceLocation || !attendanceShift) {
+      setScanResult({
+        success: false,
+        message: presensiType === 'pulang'
+          ? 'Data presensi masuk hari ini belum lengkap. Silakan hubungi admin untuk memeriksa lokasi kerja dan shift presensi masuk.'
+          : 'Lokasi kerja dan shift belum terisi. Pilih lokasi kerja dan shift, lalu scan ulang QR pegawai.'
+      });
+      return;
+    }
+    const hasFrame = await waitForSelfieFrame();
+    if (!hasFrame) {
+      setScanResult({ success: false, message: 'Kamera selfie belum siap. Tunggu wajah terlihat jelas lalu coba lagi.' });
+      return;
+    }
+    const photoDataUrl = captureSelfieDataUrl();
+    if (!photoDataUrl) {
+      setScanResult({ success: false, message: 'Foto selfie belum berhasil diambil. Pastikan wajah terlihat jelas lalu coba lagi.' });
+      return;
+    }
+
+    setIsProcessing(true);
+    stopSelfieCamera();
+    const position = await getCurrentPosition();
 
     const now = new Date();
     const isCheckIn = presensiType === 'masuk';
@@ -376,17 +646,24 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       ? {
           Date: format(now, 'yyyy-MM-dd'),
           Name: name,
-          Location: location,
-          Shift: shift as Shift,
+          Location: attendanceLocation,
+          Shift: attendanceShift,
           TimeIn: format(now, 'HH.mm'),
           Status: isLate ? 'Terlambat' : 'Tepat Waktu',
-          Note: note
+          Note: note,
+          PhotoDataUrl: photoDataUrl,
+          Latitude: position?.coords.latitude ?? null,
+          Longitude: position?.coords.longitude ?? null
         }
       : {
           Date: format(now, 'yyyy-MM-dd'),
           Name: name,
-          Shift: shift as Shift,
-          TimeOut: format(now, 'HH.mm')
+          Location: attendanceLocation,
+          Shift: attendanceShift,
+          TimeOut: format(now, 'HH.mm'),
+          PhotoDataUrl: photoDataUrl,
+          Latitude: position?.coords.latitude ?? null,
+          Longitude: position?.coords.longitude ?? null
         };
 
     try {
@@ -413,6 +690,11 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
     d.Name === name && 
     parseDateStr(d.Date) === format(new Date(), 'yyyy-MM-dd')
   ) : null;
+  const needsWorkSelection = presensiType === 'masuk';
+  const scanDisabled = (needsWorkSelection && (!location || !shift || (isLate && !note))) ||
+    (presensiType === 'masuk' && hasCheckedIn) ||
+    (presensiType === 'pulang' && hasCheckedOut);
+  const selfieActionDisabled = !isSelfieReady || isProcessing || (needsWorkSelection && (!location || !shift));
 
   return (
     <motion.div 
@@ -423,7 +705,7 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
     >
       {/* Header */}
       <div className="flex justify-between items-center py-2">
-        <img src="https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png" alt="Logo Giat" className="h-10" />
+        <img src={GIAT_LOGO_URL} alt="Logo Giat" className="h-10" />
         <button onClick={onAdminClick} className="w-10 h-10 bg-slate-200 text-slate-500 hover:bg-slate-300 rounded-full flex items-center justify-center transition-colors">
           <User size={20} />
         </button>
@@ -452,8 +734,6 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
                 : 'text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed'
             }`}
             onClick={() => setPresensiType('pulang')}
-            disabled={!hasCheckedIn}
-            title={!hasCheckedIn ? "Anda harus Presensi Masuk terlebih dahulu" : ""}
           >
             Presensi Pulang
           </button>
@@ -469,40 +749,52 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
         {/* Form Fields */}
         <div className="space-y-4">
           <div>
-            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Nama Pegawai</label>
-            <select 
-              value={name} 
-              onChange={(e) => setName(e.target.value)}
-              className="w-full p-3.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none"
-            >
-              <option value="">Pilih Nama Pegawai</option>
-              {employees.map(e => <option key={e} value={e}>{e}</option>)}
-            </select>
+            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Pegawai Ter-scan</label>
+            <div className="flex items-center gap-3 p-3.5 rounded-xl border border-slate-200 bg-slate-50">
+              <div className="w-12 h-12 rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center flex-shrink-0">
+                {scannedEmployee?.photo_url ? <img src={scannedEmployee.photo_url} alt={scannedEmployee.name} className="w-full h-full object-cover" /> : <User size={22} className="text-slate-400" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="font-bold text-slate-800 truncate">{scannedEmployee?.name || 'Belum scan QR pegawai'}</div>
+                <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 truncate">
+                  {scannedEmployee ? `${location || '-'} - ${shift || '-'}` : 'Pilih lokasi dan shift, lalu scan barcode'}
+                </div>
+              </div>
+              {scannedEmployee && (
+                <button onClick={() => setScannedEmployee(null)} className="p-2 rounded-lg hover:bg-white text-slate-400">
+                  <X size={16} />
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="flex flex-col sm:flex-row gap-4">
             <div className="flex-1">
-              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Lokasi Kerja</label>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+                Lokasi Kerja {presensiType === 'pulang' && <span className="text-slate-400 normal-case">(otomatis dari masuk)</span>}
+              </label>
               <select 
                 value={location} 
                 onChange={(e) => setLocation(e.target.value)}
-                disabled={hasCheckedIn}
-                className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
+                disabled={hasCheckedIn || presensiType === 'pulang'}
+                className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn || presensiType === 'pulang' ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
               >
-                <option value="">Pilih Lokasi</option>
+                <option value="">{presensiType === 'pulang' ? 'Mengikuti presensi masuk' : 'Pilih Lokasi'}</option>
                 {locations.map(l => <option key={l} value={l}>{l}</option>)}
               </select>
             </div>
 
             <div className="flex-1">
-              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Waktu Shift</label>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+                Waktu Shift {presensiType === 'pulang' && <span className="text-slate-400 normal-case">(otomatis dari masuk)</span>}
+              </label>
               <select 
                 value={shift} 
                 onChange={(e) => setShift(e.target.value as Shift)}
-                disabled={hasCheckedIn}
-                className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
+                disabled={hasCheckedIn || presensiType === 'pulang'}
+                className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn || presensiType === 'pulang' ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
               >
-                <option value="">Pilih Shift</option>
+                <option value="">{presensiType === 'pulang' ? 'Mengikuti presensi masuk' : 'Pilih Shift'}</option>
                 {Object.entries(shifts).map(([s, t]) => {
                   const times = t as { start_time: string; end_time: string };
                   return <option key={s} value={s}>{s} ({times.start_time} – {times.end_time})</option>;
@@ -534,19 +826,21 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
 
         <div className="pt-2">
           <button
-            disabled={!name || !location || !shift || (isLate && presensiType === 'masuk' && !note) || (presensiType === 'masuk' && hasCheckedIn) || (presensiType === 'pulang' && hasCheckedOut)}
+            disabled={scanDisabled}
             onClick={startScanner}
             className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${
-              !name || !location || !shift || (isLate && presensiType === 'masuk' && !note) || (presensiType === 'masuk' && hasCheckedIn) || (presensiType === 'pulang' && hasCheckedOut)
+              scanDisabled
                 ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
                 : 'bg-[#B21B1B] text-white hover:bg-[#901515] shadow-lg shadow-red-900/20 active:scale-95'
             }`}
           >
-            <Camera size={20} />
+            <QrCode size={20} />
             {presensiType === 'masuk' ? 'SCAN BARCODE MASUK' : 'SCAN BARCODE PULANG'}
           </button>
           <p className="text-center text-[10px] text-slate-400 mt-4">
-            Silakan scan kode QR di area presensi untuk {presensiType === 'masuk' ? 'Clock-in' : 'Clock-out'}
+            {presensiType === 'pulang'
+              ? 'Presensi pulang akan otomatis memakai lokasi kerja dan shift dari presensi masuk hari ini.'
+              : 'Silakan scan QR unik pegawai, lalu ambil foto selfie sebagai bukti presensi.'}
           </p>
         </div>
       </div>
@@ -684,10 +978,66 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
               </div>
               <div>
                 <h3 className="text-lg font-extrabold text-slate-800">Memproses...</h3>
-                <p className="text-sm text-slate-500 mt-2">QR code terdeteksi. Menyimpan data presensi.</p>
+                <p className="text-sm text-slate-500 mt-2">Memeriksa QR, mengunggah foto, dan menyimpan data presensi.</p>
               </div>
             </div>
           </motion.div>
+        </div>
+      )}
+
+      {/* Selfie Popup */}
+      {isSelfieOpen && scannedEmployee && (
+        <div className="fixed inset-0 bg-black/90 z-[55] flex flex-col items-center justify-center p-6">
+          <div className="w-full max-w-sm bg-white rounded-3xl overflow-hidden shadow-2xl">
+            <div className="p-4 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-xl overflow-hidden bg-slate-100 flex items-center justify-center">
+                  {scannedEmployee.photo_url ? <img src={scannedEmployee.photo_url} alt={scannedEmployee.name} className="w-full h-full object-cover" /> : <User size={22} className="text-slate-400" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="font-extrabold text-slate-800 truncate">{scannedEmployee.name}</div>
+                  <div className="text-xs text-slate-500 truncate">{location || 'Lokasi belum terisi'} - {shift || 'Shift belum terisi'}</div>
+                </div>
+              </div>
+            </div>
+            <div className="aspect-[3/4] bg-black relative">
+              <video
+                ref={selfieVideoRef}
+                playsInline
+                muted
+                onLoadedMetadata={() => setIsSelfieReady(true)}
+                onCanPlay={() => setIsSelfieReady(true)}
+                className="w-full h-full object-cover scale-x-[-1]"
+              />
+              {!isSelfieReady && (
+                <div className="absolute inset-0 bg-black/55 flex items-center justify-center text-white text-sm font-bold">
+                  Menyiapkan kamera...
+                </div>
+              )}
+            </div>
+            <div className="px-4 pt-4">
+              <div className="rounded-xl bg-blue-50 border border-blue-100 p-3 text-xs text-blue-800 leading-relaxed">
+                Selfie wajah digunakan sebagai bukti presensi dan akan disimpan bersama waktu, lokasi kerja, shift, serta koordinat absen.
+              </div>
+            </div>
+            <div className="p-4 flex gap-3">
+              <button onClick={stopSelfieCamera} className="flex-1 py-3 rounded-xl border border-slate-200 text-slate-600 font-bold">
+                Batal
+              </button>
+              <button
+                onClick={processAttendance}
+                disabled={selfieActionDisabled}
+                className={`flex-1 py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
+                  selfieActionDisabled
+                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                    : 'bg-[#B21B1B] text-white hover:bg-[#901515]'
+                }`}
+              >
+                <Camera size={18} />
+                {needsWorkSelection && (!location || !shift) ? 'Lengkapi Data' : isSelfieReady ? (presensiType === 'masuk' ? 'Proses Masuk' : 'Proses Pulang') : 'Tunggu Kamera'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -776,7 +1126,7 @@ function AdminLogin({ onLoginSuccess, onBack }: { onLoginSuccess: () => void; on
     >
       <div className="w-full max-w-md bg-white rounded-3xl p-8 shadow-xl border border-slate-100 space-y-8">
         <div className="text-center mb-8">
-          <img src="https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png" alt="Logo" className="h-16 mx-auto mb-4" />
+          <img src={GIAT_LOGO_URL} alt="Logo" className="h-16 mx-auto mb-4" />
           <h2 className="text-3xl font-black text-slate-800 tracking-tight">Admin Login</h2>
           <p className="text-slate-500 text-sm">Akses monitoring Koperasi Giat</p>
         </div>
@@ -841,12 +1191,13 @@ function AdminLogin({ onLoginSuccess, onBack }: { onLoginSuccess: () => void; on
 
 function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   const { showToast } = useToast();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'employees' | 'master-data' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'employees' | 'master-data' | 'attendance-photos' | 'settings'>('dashboard');
   const [isDesktopCollapsed, setIsDesktopCollapsed] = useState(false);
   const [attendanceData, setAttendanceData] = useState<AttendanceData[]>([]);
   const [loading, setLoading] = useState(true);
   const [showPresentPopup, setShowPresentPopup] = useState(false);
   const [showLatePopup, setShowLatePopup] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ src: string; title: string; subtitle: string } | null>(null);
 
   // History Filters
   const [startDate, setStartDate] = useState(format(subDays(new Date(), 5), 'yyyy-MM-dd'));
@@ -963,7 +1314,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
         <div className={`flex ${isDesktopCollapsed ? 'flex-col gap-4 items-center' : 'items-center justify-center'} mb-10 pb-6 border-b border-slate-100 mt-2 min-h-[48px] relative`}>
           {isDesktopCollapsed ? (
             <>
-              <img src="https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png" alt="Logo" className="w-10 h-10 object-contain mx-auto" />
+              <img src={GIAT_LOGO_URL} alt="Logo" className="w-10 h-10 object-contain mx-auto" />
               <button 
                 onClick={() => setIsDesktopCollapsed(false)} 
                 className="p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 rounded-lg transition-colors"
@@ -973,7 +1324,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
             </>
           ) : (
             <>
-              <img src="https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png" alt="Logo" className="h-12 object-contain drop-shadow-sm" />
+              <img src={GIAT_LOGO_URL} alt="Logo" className="h-12 object-contain drop-shadow-sm" />
               <button 
                 onClick={() => setIsDesktopCollapsed(true)} 
                 className="absolute right-4 top-2 p-1.5 text-slate-400 hover:bg-slate-100 rounded-md transition-colors"
@@ -989,6 +1340,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           <SidebarItem collapsed={isDesktopCollapsed} icon={<History size={22} />} label="Riwayat Presensi" active={activeTab === 'history'} onClick={() => setActiveTab('history')} />
           <SidebarItem collapsed={isDesktopCollapsed} icon={<User size={22} />} label="Data Pegawai" active={activeTab === 'employees'} onClick={() => setActiveTab('employees')} />
           <SidebarItem collapsed={isDesktopCollapsed} icon={<Database size={22} />} label="Master Data" active={activeTab === 'master-data'} onClick={() => setActiveTab('master-data')} />
+          <SidebarItem collapsed={isDesktopCollapsed} icon={<ImageIcon size={22} />} label="Foto Presensi" active={activeTab === 'attendance-photos'} onClick={() => setActiveTab('attendance-photos')} />
           <SidebarItem collapsed={isDesktopCollapsed} icon={<Settings size={22} />} label="Pengaturan" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
         </nav>
 
@@ -1005,7 +1357,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="bg-white border-b border-slate-200 px-4 lg:px-6 py-3 lg:py-4 flex items-center justify-between sticky top-0 z-30 shadow-sm">
           <div className="flex items-center gap-3">
-            <img src="https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png" alt="Logo" className="h-8 lg:hidden" />
+            <img src={GIAT_LOGO_URL} alt="Logo" className="h-8 lg:hidden" />
             <span className="font-extrabold text-[#B21B1B] lg:hidden text-sm">Koperasi GIAT</span>
           </div>
           <div className="flex items-center gap-4">
@@ -1072,12 +1424,13 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                             <th className="px-6 py-4">Shift</th>
                             <th className="px-6 py-4">Jam Datang</th>
                             <th className="px-6 py-4">Jam Pulang</th>
+                            <th className="px-6 py-4">Bukti</th>
                             <th className="px-6 py-4">Status / Catatan</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-50">
                           {todayData.length === 0 ? (
-                            <tr><td colSpan={6} className="px-6 py-12 text-center text-slate-400 font-medium">Belum ada data presensi hari ini.</td></tr>
+                            <tr><td colSpan={7} className="px-6 py-12 text-center text-slate-400 font-medium">Belum ada data presensi hari ini.</td></tr>
                           ) : (
                             todayData.map((d, i) => (
                               <tr key={i} className="hover:bg-slate-50/80 transition-colors group">
@@ -1086,6 +1439,12 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                                 <td className="px-6 py-4 text-slate-500 text-sm">{d.Shift}</td>
                                 <td className="px-6 py-4 text-sm font-bold text-slate-700">{d.TimeIn}</td>
                                 <td className="px-6 py-4 text-slate-400 text-sm font-medium">{d.TimeOut || '--:--'}</td>
+                                <td className="px-6 py-4">
+                                  <div className="flex gap-2">
+                                    {d.CheckInPhotoUrl && <EvidencePhoto src={d.CheckInPhotoUrl} alt="Bukti masuk" className="w-10 h-10 rounded-lg object-cover border border-slate-200" onClick={() => setPreviewImage({ src: d.CheckInPhotoUrl || '', title: d.Name, subtitle: `${d.Date} - Masuk ${d.TimeIn || '--:--'} - ${d.Location}` })} />}
+                                    {d.CheckOutPhotoUrl && <EvidencePhoto src={d.CheckOutPhotoUrl} alt="Bukti pulang" className="w-10 h-10 rounded-lg object-cover border border-slate-200" onClick={() => setPreviewImage({ src: d.CheckOutPhotoUrl || '', title: d.Name, subtitle: `${d.Date} - Pulang ${d.TimeOut || '--:--'} - ${d.Location}` })} />}
+                                  </div>
+                                </td>
                                 <td className="px-6 py-4">
                                   <div className="flex flex-col gap-1 items-start">
                                     <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${
@@ -1128,7 +1487,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
 
                   <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="w-full text-left min-w-[800px]">
+                      <table className="w-full text-left min-w-[960px]">
                         <thead className="bg-slate-50 text-slate-400 text-[10px] uppercase tracking-widest font-bold">
                           <tr>
                             <th className="px-6 py-4">Tanggal</th>
@@ -1137,6 +1496,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                             <th className="px-6 py-4">Shift</th>
                             <th className="px-6 py-4">Datang</th>
                             <th className="px-6 py-4">Pulang</th>
+                            <th className="px-6 py-4">Bukti Foto</th>
                             <th className="px-6 py-4">Status</th>
                           </tr>
                         </thead>
@@ -1150,6 +1510,13 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                               <td className="px-6 py-4 text-slate-700 font-bold">{d.TimeIn}</td>
                               <td className="px-6 py-4 text-slate-400 font-medium">{d.TimeOut || '--:--'}</td>
                               <td className="px-6 py-4">
+                                <div className="flex gap-2">
+                                  {d.CheckInPhotoUrl && <EvidencePhoto src={d.CheckInPhotoUrl} alt="Masuk" className="w-10 h-10 rounded-lg object-cover border border-slate-200" onClick={() => setPreviewImage({ src: d.CheckInPhotoUrl || '', title: d.Name, subtitle: `${d.Date} - Masuk ${d.TimeIn || '--:--'} - ${d.Location}` })} />}
+                                  {d.CheckOutPhotoUrl && <EvidencePhoto src={d.CheckOutPhotoUrl} alt="Pulang" className="w-10 h-10 rounded-lg object-cover border border-slate-200" onClick={() => setPreviewImage({ src: d.CheckOutPhotoUrl || '', title: d.Name, subtitle: `${d.Date} - Pulang ${d.TimeOut || '--:--'} - ${d.Location}` })} />}
+                                  {!d.CheckInPhotoUrl && !d.CheckOutPhotoUrl && <span className="text-slate-300">-</span>}
+                                </div>
+                              </td>
+                              <td className="px-6 py-4">
                                 <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${d.Status === 'Terlambat' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
                                   {d.Status}
                                 </span>
@@ -1157,7 +1524,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                             </tr>
                           ))}
                           {filteredHistory.length === 0 && (
-                            <tr><td colSpan={7} className="px-6 py-12 text-center text-slate-400 font-medium">Tidak ada data untuk periode ini.</td></tr>
+                            <tr><td colSpan={8} className="px-6 py-12 text-center text-slate-400 font-medium">Tidak ada data untuk periode ini.</td></tr>
                           )}
                         </tbody>
                       </table>
@@ -1206,6 +1573,10 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
 
               {activeTab === 'master-data' && (
                 <MasterDataView />
+              )}
+
+              {activeTab === 'attendance-photos' && (
+                <AttendancePhotosView onChanged={fetchData} />
               )}
 
               {activeTab === 'settings' && (
@@ -1277,6 +1648,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           <BottomNavItem icon={<History size={20} />} label="Riwayat" active={activeTab === 'history'} onClick={() => setActiveTab('history')} />
           <BottomNavItem icon={<User size={20} />} label="Pegawai" active={activeTab === 'employees'} onClick={() => setActiveTab('employees')} />
           <BottomNavItem icon={<Database size={20} />} label="Master" active={activeTab === 'master-data'} onClick={() => setActiveTab('master-data')} />
+          <BottomNavItem icon={<ImageIcon size={20} />} label="Foto" active={activeTab === 'attendance-photos'} onClick={() => setActiveTab('attendance-photos')} />
           <BottomNavItem icon={<Settings size={20} />} label="Setting" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
         </nav>
       </div>
@@ -1313,6 +1685,30 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           </Modal>
         )}
       </AnimatePresence>
+
+      {previewImage && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <button
+            onClick={() => setPreviewImage(null)}
+            className="absolute inset-0 cursor-zoom-out"
+            aria-label="Tutup preview foto"
+          />
+          <div className="relative z-10 w-full max-w-5xl max-h-[92vh] bg-white rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-extrabold text-slate-800 truncate">{previewImage.title}</div>
+                <div className="text-xs text-slate-500 truncate">{previewImage.subtitle}</div>
+              </div>
+              <button onClick={() => setPreviewImage(null)} className="p-2 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="bg-black flex-1 min-h-0 flex items-center justify-center">
+              <EvidencePhoto src={previewImage.src} alt={previewImage.title} className="max-w-full max-h-[78vh] object-contain" />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1439,16 +1835,160 @@ function TimePicker({ label, value, onChange }: { label: string; value: string; 
   );
 }
 
+function AttendancePhotosView({ onChanged }: { onChanged: () => void }) {
+  const { showToast, showConfirm } = useToast();
+  const [photos, setPhotos] = useState<AttendancePhoto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [previewPhoto, setPreviewPhoto] = useState<AttendancePhoto | null>(null);
+  const [deletingPhotoKey, setDeletingPhotoKey] = useState<string | null>(null);
+
+  const fetchPhotos = async () => {
+    setLoading(true);
+    const data = await api.getAttendancePhotos();
+    setPhotos(data);
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchPhotos(); }, []);
+
+  const photoKey = (photo: AttendancePhoto) => `${photo.attendanceId}-${photo.type}`;
+
+  const handleDelete = (photo: AttendancePhoto) => {
+    showConfirm(`Hapus foto presensi ${photo.type} milik "${photo.name}"?\n\nAsset juga akan dihapus dari CDN.`, async () => {
+      const key = photoKey(photo);
+      setDeletingPhotoKey(key);
+      try {
+        const result = await api.deleteAttendancePhoto(photo.attendanceId, photo.type);
+        if (result.success) {
+          showToast('Foto presensi berhasil dihapus', 'success');
+          await fetchPhotos();
+          onChanged();
+        } else {
+          showToast(result.message || 'Gagal menghapus foto presensi', 'error');
+        }
+      } finally {
+        setDeletingPhotoKey(null);
+      }
+    });
+  };
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-32 space-y-4">
+        <div className="w-12 h-12 border-4 border-[#B21B1B] border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-[#B21B1B] font-bold tracking-widest animate-pulse text-sm">MEMUAT FOTO...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-200 pb-6">
+        <div>
+          <h2 className="text-2xl font-black text-slate-800">Foto Presensi</h2>
+          <p className="text-slate-500 text-sm mt-1">Kelola bukti foto presensi yang tersimpan di CDN.</p>
+        </div>
+        <button onClick={fetchPhotos} className="px-4 py-2 rounded-xl bg-red-50 text-[#B21B1B] text-xs font-bold hover:bg-red-100">
+          Refresh
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
+        {photos.map(photo => {
+          const isDeleting = deletingPhotoKey === photoKey(photo);
+          return (
+          <div key={photoKey(photo)} className={`bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden transition-opacity ${isDeleting ? 'opacity-70 pointer-events-none' : ''}`}>
+            <div className="block aspect-[4/3] bg-slate-100">
+              <EvidencePhoto
+                src={photo.url}
+                alt={`Foto ${photo.type} ${photo.name}`}
+                className="w-full h-full object-cover"
+                onClick={() => setPreviewPhoto(photo)}
+              />
+            </div>
+            <div className="p-4 space-y-3">
+              <div>
+                <div className="font-extrabold text-slate-800 truncate">{photo.name}</div>
+                <div className="text-xs text-slate-500">{photo.date} - {photo.time || '--:--'} - {photo.type.toUpperCase()}</div>
+              </div>
+              <div className="text-xs text-slate-500 space-y-1">
+                <div className="flex items-center gap-1.5"><MapPin size={12} /> {photo.location}</div>
+                <div className="flex items-center gap-1.5"><ClockIcon size={12} /> {photo.shift}</div>
+                <div className="font-mono text-[10px] text-slate-400">
+                  {photo.latitude && photo.longitude ? `${photo.latitude}, ${photo.longitude}` : 'Koordinat tidak tersedia'}
+                </div>
+              </div>
+              <button onClick={() => handleDelete(photo)} className="w-full py-2.5 rounded-xl bg-red-50 text-red-600 font-bold text-xs hover:bg-red-100 flex items-center justify-center gap-2">
+                {isDeleting ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-red-200 border-t-red-600 rounded-full animate-spin" />
+                    Menghapus...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={14} />
+                    Hapus Foto
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        );
+        })}
+        {photos.length === 0 && (
+          <div className="col-span-full py-16 text-center text-slate-400 font-medium bg-white rounded-2xl border border-slate-100">
+            Belum ada foto presensi yang tersimpan.
+          </div>
+        )}
+      </div>
+
+      {previewPhoto && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <button
+            onClick={() => setPreviewPhoto(null)}
+            className="absolute inset-0 cursor-zoom-out"
+            aria-label="Tutup preview foto"
+          />
+          <div className="relative z-10 w-full max-w-5xl max-h-[92vh] bg-white rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-extrabold text-slate-800 truncate">{previewPhoto.name}</div>
+                <div className="text-xs text-slate-500 truncate">
+                  {previewPhoto.date} - {previewPhoto.time || '--:--'} - {previewPhoto.type.toUpperCase()} - {previewPhoto.location}
+                </div>
+              </div>
+              <button onClick={() => setPreviewPhoto(null)} className="p-2 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="bg-black flex-1 min-h-0 flex items-center justify-center">
+              <EvidencePhoto
+                src={previewPhoto.url}
+                alt={`Foto ${previewPhoto.type} ${previewPhoto.name}`}
+                className="max-w-full max-h-[78vh] object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MasterDataView() {
   const { showToast, showConfirm } = useToast();
   const [subTab, setSubTab] = useState<'employees' | 'locations' | 'shifts'>('employees');
-  const [employees, setEmployees] = useState<{name: string, status: string}[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [locations, setLocations] = useState<string[]>([]);
   const [shifts, setShifts] = useState<Record<string, { start_time: string; end_time: string; is_overtime: boolean }>>({});
   const [loading, setLoading] = useState(true);
 
   // Form states
   const [newEmpName, setNewEmpName] = useState('');
+  const [newEmpPhotoDataUrl, setNewEmpPhotoDataUrl] = useState('');
+  const [newEmpPhotoPreview, setNewEmpPhotoPreview] = useState('');
+  const [selectedQrEmployee, setSelectedQrEmployee] = useState<Employee | null>(null);
+  const [savingQrName, setSavingQrName] = useState<string | null>(null);
   const [newLocation, setNewLocation] = useState('');
   const [newShiftName, setNewShiftName] = useState('');
   const [newShiftTime, setNewShiftTime] = useState('08:00');
@@ -1479,14 +2019,23 @@ function MasterDataView() {
   // === EMPLOYEE HANDLERS ===
   const handleAddEmployee = async () => {
     if (!newEmpName.trim()) return;
-    const result = await api.addEmployee({ name: newEmpName.trim(), status: 'AKTIF' });
+    const result = await api.addEmployee({ name: newEmpName.trim(), status: 'AKTIF', photoDataUrl: newEmpPhotoDataUrl || undefined });
     if (result.success) {
       setNewEmpName('');
+      setNewEmpPhotoDataUrl('');
+      setNewEmpPhotoPreview('');
       showToast('Pegawai berhasil ditambahkan', 'success');
       fetchAll();
     } else {
       showToast(result.message || 'Gagal menambahkan pegawai', 'error');
     }
+  };
+
+  const handleEmployeePhotoChange = async (file?: File) => {
+    if (!file) return;
+    const dataUrl = await fileToDataUrl(file);
+    setNewEmpPhotoDataUrl(dataUrl);
+    setNewEmpPhotoPreview(dataUrl);
   };
 
   const handleUpdateEmployeeStatus = async (name: string, status: string) => {
@@ -1500,6 +2049,26 @@ function MasterDataView() {
       if (result.message) showToast(result.message, 'info');
       fetchAll();
     });
+  };
+
+  const handleSaveQrToCdn = async (employee: Employee) => {
+    if (!employee.qr_code) return;
+    setSavingQrName(employee.name);
+    try {
+      const qrDataUrl = await createStyledQrDataUrl(employee.qr_code);
+      const result = await api.saveEmployeeQrImage(employee.name, qrDataUrl);
+      if (result.success) {
+        showToast('QR berlogo berhasil disimpan ke CDN', 'success');
+        await fetchAll();
+        setSelectedQrEmployee(prev => prev?.name === employee.name ? { ...prev, qr_url: result.qr_url, qr_file_id: result.qr_file_id } : prev);
+      } else {
+        showToast(result.message || 'Gagal menyimpan QR ke CDN', 'error');
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Gagal membuat QR berlogo', 'error');
+    } finally {
+      setSavingQrName(null);
+    }
   };
 
   // === LOCATION HANDLERS ===
@@ -1610,14 +2179,26 @@ function MasterDataView() {
           {/* Form tambah */}
           <div className="bg-white p-4 sm:p-6 rounded-3xl shadow-sm border border-slate-100">
             <h3 className="font-extrabold text-slate-800 mb-4">Tambah Pegawai Baru</h3>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <input
-                type="text"
-                value={newEmpName}
-                onChange={e => setNewEmpName(e.target.value)}
-                placeholder="Nama pegawai"
-                className="flex-1 p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none"
-              />
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-start">
+              <div className="space-y-3">
+                <input
+                  type="text"
+                  value={newEmpName}
+                  onChange={e => setNewEmpName(e.target.value)}
+                  placeholder="Nama pegawai"
+                  className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none"
+                />
+                <label className="flex items-center gap-3 p-3 rounded-xl border border-dashed border-slate-300 bg-slate-50 cursor-pointer hover:bg-slate-100">
+                  <div className="w-12 h-12 rounded-xl bg-white border border-slate-200 overflow-hidden flex items-center justify-center flex-shrink-0">
+                    {newEmpPhotoPreview ? <img src={newEmpPhotoPreview} alt="Preview pegawai" className="w-full h-full object-cover" /> : <Upload size={18} className="text-slate-400" />}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-slate-700">Foto pegawai</div>
+                    <div className="text-xs text-slate-400 truncate">JPG/PNG, opsional</div>
+                  </div>
+                  <input type="file" accept="image/*" className="hidden" onChange={e => handleEmployeePhotoChange(e.target.files?.[0])} />
+                </label>
+              </div>
               <button onClick={handleAddEmployee} className="px-6 py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap">
                 <Plus size={16} /> Tambah
               </button>
@@ -1636,10 +2217,11 @@ function MasterDataView() {
                 <div key={emp.name} className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-slate-50/50">
                   <div className="flex items-center gap-3 min-w-0 flex-1">
                     <span className="text-slate-400 text-xs font-medium w-5 flex-shrink-0">{i + 1}</span>
-                    <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0">
-                      <User size={16} className="text-slate-500" />
+                    <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden">
+                      {emp.photo_url ? <img src={emp.photo_url} alt={emp.name} className="w-full h-full object-cover" /> : <User size={16} className="text-slate-500" />}
                     </div>
                     <span className="font-bold text-slate-800 truncate">{emp.name}</span>
+                    {emp.qr_code && <QrWithLogo qrCode={emp.qr_code} employeeName={emp.name} sizeClass="w-9 h-9" onClick={() => setSelectedQrEmployee(emp)} />}
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <div className="relative">
@@ -1675,7 +2257,9 @@ function MasterDataView() {
                 <thead className="bg-slate-50 text-slate-400 text-[10px] uppercase tracking-widest font-bold">
                   <tr>
                     <th className="px-6 py-4">#</th>
+                    <th className="px-6 py-4">Foto</th>
                     <th className="px-6 py-4">Nama</th>
+                    <th className="px-6 py-4">QR Presensi</th>
                     <th className="px-6 py-4">Status</th>
                     <th className="px-6 py-4">Aksi</th>
                   </tr>
@@ -1684,7 +2268,20 @@ function MasterDataView() {
                   {employees.map((emp, i) => (
                     <tr key={emp.name} className="hover:bg-slate-50/50 transition-colors text-sm">
                       <td className="px-6 py-4 text-slate-400">{i + 1}</td>
+                      <td className="px-6 py-4">
+                        <div className="w-12 h-12 rounded-xl overflow-hidden bg-slate-100 flex items-center justify-center border border-slate-200">
+                          {emp.photo_url ? <img src={emp.photo_url} alt={emp.name} className="w-full h-full object-cover" /> : <User size={18} className="text-slate-400" />}
+                        </div>
+                      </td>
                       <td className="px-6 py-4 font-bold text-slate-800">{emp.name}</td>
+                      <td className="px-6 py-4">
+                        {emp.qr_code ? (
+                          <div className="inline-flex items-center gap-3">
+                            <QrWithLogo qrCode={emp.qr_code} employeeName={emp.name} sizeClass="w-16 h-16" onClick={() => setSelectedQrEmployee(emp)} />
+                            <HiddenToken value={emp.qr_code} compact />
+                          </div>
+                        ) : <span className="text-slate-300">-</span>}
+                      </td>
                       <td className="px-6 py-4">
                         <div className="relative inline-block">
                           <select
@@ -1711,7 +2308,7 @@ function MasterDataView() {
                     </tr>
                   ))}
                   {employees.length === 0 && (
-                    <tr><td colSpan={4} className="px-6 py-12 text-center text-slate-400">Belum ada data pegawai.</td></tr>
+                    <tr><td colSpan={6} className="px-6 py-12 text-center text-slate-400">Belum ada data pegawai.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1798,7 +2395,7 @@ function MasterDataView() {
                 />
                 <div className="flex-1">
                   <div className="text-sm font-bold text-slate-800">Tandai sebagai shift lembur</div>
-                  <div className="text-xs text-slate-500">Shift ini tidak akan dicek keterlambatannya & dihitung sebagai lembur di statistik</div>
+                  <div className="text-xs text-slate-500">Shift ini tetap dicek keterlambatannya dan dihitung sebagai lembur di statistik</div>
                 </div>
               </label>
               <button onClick={handleAddShift} className="w-full py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all active:scale-95 flex items-center justify-center gap-2">
@@ -1884,6 +2481,56 @@ function MasterDataView() {
           </div>
         </div>
       )}
+
+      {selectedQrEmployee && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+          <button
+            onClick={() => setSelectedQrEmployee(null)}
+            className="absolute inset-0"
+            aria-label="Tutup QR"
+          />
+          <div className="relative z-10 w-full max-w-sm bg-white rounded-2xl overflow-hidden shadow-2xl">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-extrabold text-slate-800 truncate">{selectedQrEmployee.name}</div>
+                <HiddenToken value={selectedQrEmployee.qr_code} />
+              </div>
+              <button onClick={() => setSelectedQrEmployee(null)} className="p-2 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-6 flex flex-col items-center gap-4">
+              <QrWithLogo qrCode={selectedQrEmployee.qr_code} employeeName={selectedQrEmployee.name} sizeClass="w-64 h-64" />
+              <button
+                onClick={() => handleSaveQrToCdn(selectedQrEmployee)}
+                disabled={savingQrName === selectedQrEmployee.name}
+                className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
+                  savingQrName === selectedQrEmployee.name
+                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                    : 'bg-[#B21B1B] text-white hover:bg-[#901515]'
+                }`}
+              >
+                {savingQrName === selectedQrEmployee.name ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-slate-300 border-t-[#B21B1B] rounded-full animate-spin" />
+                    Menyimpan ke CDN...
+                  </>
+                ) : (
+                  <>
+                    <Upload size={16} />
+                    Simpan QR ke CDN
+                  </>
+                )}
+              </button>
+              {selectedQrEmployee.qr_url && (
+                <div className="text-[10px] text-green-600 font-bold uppercase tracking-widest">
+                  QR sudah tersimpan di CDN
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1894,7 +2541,7 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
   const [startDate, setStartDate] = useState(format(subDays(new Date(), 30), 'yyyy-MM-dd'));
   const [endDate, setEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [searchQuery, setSearchQuery] = useState('');
-  const [employeeList, setEmployeeList] = useState<{name: string, status: string}[]>([]);
+  const [employeeList, setEmployeeList] = useState<Employee[]>([]);
   const [shiftMap, setShiftMap] = useState<Record<string, { is_overtime: boolean }>>({});
 
   // Fetch employees & shifts dari database
