@@ -4,6 +4,14 @@
  */
 const mysql = require('mysql2/promise');
 
+async function addColumnIfMissing(connection, tableName, columnName, definition) {
+  try {
+    await connection.query(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  } catch (e) {
+    // Kolom sudah ada, ignore.
+  }
+}
+
 async function initDatabase() {
   const host = process.env.DB_HOST || 'localhost';
   const port = process.env.DB_PORT || 3306;
@@ -27,10 +35,22 @@ async function initDatabase() {
       CREATE TABLE IF NOT EXISTS employees (
         id INT PRIMARY KEY AUTO_INCREMENT,
         name VARCHAR(100) NOT NULL UNIQUE,
+        qr_code VARCHAR(120) NOT NULL UNIQUE,
+        qr_file_id VARCHAR(120) DEFAULT NULL,
+        qr_url TEXT,
+        photo_file_id VARCHAR(120) DEFAULT NULL,
+        photo_url TEXT,
         status ENUM('AKTIF', 'CUTI', 'NONAKTIF') DEFAULT 'AKTIF',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+    await addColumnIfMissing(connection, 'employees', 'qr_code', 'VARCHAR(120) NULL UNIQUE');
+    await addColumnIfMissing(connection, 'employees', 'qr_file_id', 'VARCHAR(120) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'employees', 'qr_url', 'TEXT');
+    await addColumnIfMissing(connection, 'employees', 'photo_file_id', 'VARCHAR(120) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'employees', 'photo_url', 'TEXT');
+    await connection.query("UPDATE employees SET qr_code = CONCAT('GIAT-EMP-', id, '-', REPLACE(UUID(), '-', '')) WHERE qr_code IS NULL OR qr_code = ''");
+    await connection.query('ALTER TABLE employees MODIFY qr_code VARCHAR(120) NOT NULL');
     console.log('✅ Tabel "employees" siap.');
 
     // Tabel locations
@@ -91,9 +111,25 @@ async function initDatabase() {
         time_out VARCHAR(10) DEFAULT NULL,
         status ENUM('Tepat Waktu', 'Terlambat') NOT NULL DEFAULT 'Tepat Waktu',
         note TEXT,
+        check_in_photo_file_id VARCHAR(120) DEFAULT NULL,
+        check_in_photo_url TEXT,
+        check_in_latitude DECIMAL(10, 7) DEFAULT NULL,
+        check_in_longitude DECIMAL(10, 7) DEFAULT NULL,
+        check_out_photo_file_id VARCHAR(120) DEFAULT NULL,
+        check_out_photo_url TEXT,
+        check_out_latitude DECIMAL(10, 7) DEFAULT NULL,
+        check_out_longitude DECIMAL(10, 7) DEFAULT NULL,
         INDEX idx_date_name (date, name)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+    await addColumnIfMissing(connection, 'attendance', 'check_in_photo_file_id', 'VARCHAR(120) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_in_photo_url', 'TEXT');
+    await addColumnIfMissing(connection, 'attendance', 'check_in_latitude', 'DECIMAL(10, 7) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_in_longitude', 'DECIMAL(10, 7) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_out_photo_file_id', 'VARCHAR(120) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_out_photo_url', 'TEXT');
+    await addColumnIfMissing(connection, 'attendance', 'check_out_latitude', 'DECIMAL(10, 7) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_out_longitude', 'DECIMAL(10, 7) DEFAULT NULL');
     console.log('✅ Tabel "attendance" siap.');
 
     // Tabel admin_config
