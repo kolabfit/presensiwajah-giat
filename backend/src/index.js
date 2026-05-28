@@ -10,6 +10,8 @@ const employeesRoutes = require('./routes/employees');
 const locationsRoutes = require('./routes/locations');
 const shiftsRoutes = require('./routes/shifts');
 const settingsRoutes = require('./routes/settings');
+const { startAttendanceCleanupScheduler } = require('./services/attendanceCleanup');
+const { UPLOADS_DIR } = require('./services/cdn');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -44,7 +46,23 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
-app.use(express.json());
+app.use(express.json({ limit: '12mb' }));
+app.use('/uploads', express.static(UPLOADS_DIR, {
+  maxAge: '1h',
+  setHeaders: (res) => {
+    res.setHeader('Content-Disposition', 'inline');
+  }
+}));
+
+app.use((err, req, res, next) => {
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({
+      success: false,
+      message: 'Ukuran foto terlalu besar. Pilih foto yang lebih kecil atau kompres foto terlebih dahulu.'
+    });
+  }
+  return next(err);
+});
 
 // === ROUTES ===
 app.use('/api/attendance', attendanceRoutes);
@@ -65,6 +83,7 @@ initDatabase()
     app.listen(PORT, () => {
       console.log(`\n🚀 Server berjalan di http://localhost:${PORT}`);
       console.log(`📋 Mode: ${isProduction ? 'production' : 'development'}\n`);
+      startAttendanceCleanupScheduler();
     });
   })
   .catch(err => {

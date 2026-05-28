@@ -192,13 +192,42 @@ export const api = {
     return await res.json();
   },
 
-  async updateEmployee(name: string, status: string) {
+  async updateEmployee(name: string, status: string, photoDataUrl?: string) {
     const res = await fetch(`${API_URL}/employees/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status })
+      body: JSON.stringify({ status, photoDataUrl })
     });
-    return await res.json();
+    const text = await res.text();
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch (e) {
+      return {
+        success: false,
+        message: res.status === 413
+          ? 'Ukuran foto terlalu besar. Pilih foto yang lebih kecil.'
+          : 'Perubahan pegawai belum berhasil disimpan. Silakan coba lagi.'
+      };
+    }
+  },
+
+  async updateEmployeePhoto(name: string, photoDataUrl: string) {
+    const res = await fetch(`${API_URL}/employees/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photoDataUrl })
+    });
+    const text = await res.text();
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch (e) {
+      return {
+        success: false,
+        message: res.status === 413
+          ? 'Ukuran foto terlalu besar. Pilih foto yang lebih kecil.'
+          : 'Foto pegawai belum berhasil diperbarui. Silakan coba lagi.'
+      };
+    }
   },
 
   async deleteEmployee(name: string) {
@@ -287,6 +316,15 @@ export const api = {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings)
+    });
+    return await res.json();
+  },
+
+  async runAttendanceCleanup(retentionDays: number) {
+    const res = await fetch(`${API_URL}/settings/attendance-cleanup/run`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ retentionDays })
     });
     return await res.json();
   }

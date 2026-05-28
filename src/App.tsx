@@ -41,6 +41,28 @@ function blobToDataUrl(blob: Blob) {
   });
 }
 
+async function imageFileToCompressedDataUrl(file: File, maxSize = 900, quality = 0.82) {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('File harus berupa gambar.');
+  }
+
+  const rawDataUrl = await fileToDataUrl(file);
+  const image = await loadImage(rawDataUrl);
+  const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Foto belum bisa diproses. Silakan coba foto lain.');
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(image, 0, 0, width, height);
+  return canvas.toDataURL('image/jpeg', quality);
+}
+
 function createStyledQr(qrCode: string) {
   return new QRCodeStyling({
     width: 320,
@@ -83,6 +105,137 @@ async function createStyledQrDataUrl(qrCode: string) {
     throw new Error('Gagal membuat gambar QR');
   }
   return await blobToDataUrl(raw);
+}
+
+function sanitizeFileName(value: string) {
+  return value
+    .trim()
+    .replace(/[^a-z0-9-_]+/gi, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase() || 'pegawai';
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+function drawCenteredWrappedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number, maxLines = 2) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = '';
+
+  words.forEach((word) => {
+    const testLine = line ? `${line} ${word}` : word;
+    if (ctx.measureText(testLine).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = testLine;
+    }
+  });
+  if (line) lines.push(line);
+
+  const visibleLines = lines.slice(0, maxLines);
+  if (lines.length > maxLines) {
+    const last = visibleLines[maxLines - 1];
+    let shortened = last;
+    while (ctx.measureText(`${shortened}...`).width > maxWidth && shortened.length > 1) {
+      shortened = shortened.slice(0, -1);
+    }
+    visibleLines[maxLines - 1] = `${shortened}...`;
+  }
+
+  visibleLines.forEach((textLine, index) => {
+    ctx.fillText(textLine, x, y + (index * lineHeight));
+  });
+}
+
+function drawCenteredQrDescription(ctx: CanvasRenderingContext2D, employeeName: string, centerX: number, y: number) {
+  const prefix = 'QR ini khusus untuk presensi pegawai';
+  const suffix = '.';
+
+  ctx.textAlign = 'center';
+  ctx.font = '600 24px Arial, sans-serif';
+  const prefixWidth = ctx.measureText(prefix).width;
+  ctx.font = '800 24px Arial, sans-serif';
+  const nameWidth = ctx.measureText(employeeName).width;
+  ctx.font = '600 24px Arial, sans-serif';
+  const suffixWidth = ctx.measureText(suffix).width;
+  const totalWidth = prefixWidth + 8 + nameWidth + suffixWidth;
+  let x = centerX - (totalWidth / 2);
+
+  ctx.fillStyle = '#64748B';
+  ctx.font = '600 24px Arial, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(prefix, x, y);
+  x += prefixWidth + 8;
+
+  ctx.fillStyle = '#111827';
+  ctx.font = '800 24px Arial, sans-serif';
+  ctx.fillText(employeeName, x, y);
+  x += nameWidth;
+
+  ctx.fillStyle = '#64748B';
+  ctx.font = '600 24px Arial, sans-serif';
+  ctx.fillText(suffix, x, y);
+}
+
+async function createEmployeeQrDownloadDataUrl(employee: Employee) {
+  if (!employee.qr_code) throw new Error('QR pegawai belum tersedia');
+
+  const employeeName = String(employee.name || 'Nama Pegawai').trim() || 'Nama Pegawai';
+  const qrDataUrl = await createStyledQrDataUrl(employee.qr_code);
+  const qrImage = await loadImage(qrDataUrl);
+  const canvas = document.createElement('canvas');
+  canvas.width = 900;
+  canvas.height = 1200;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Gagal membuat file QR');
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = '#B21B1B';
+  ctx.fillRect(0, 0, canvas.width, 18);
+
+  ctx.fillStyle = '#111827';
+  ctx.font = '700 44px Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('QR PRESENSI PEGAWAI', canvas.width / 2, 95);
+
+  ctx.fillStyle = '#64748B';
+  ctx.font = '600 22px Arial, sans-serif';
+  ctx.fillText('Koperasi GIAT', canvas.width / 2, 135);
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.strokeStyle = '#E2E8F0';
+  ctx.lineWidth = 2;
+  ctx.roundRect(150, 250, 600, 600, 32);
+  ctx.fill();
+  ctx.stroke();
+  ctx.drawImage(qrImage, 190, 290, 520, 520);
+
+  ctx.fillStyle = '#64748B';
+  ctx.font = '600 24px Arial, sans-serif';
+  ctx.textAlign = 'center';
+  drawCenteredQrDescription(ctx, employeeName, canvas.width / 2, 970);
+
+  return canvas.toDataURL('image/png', 0.95);
+}
+
+function downloadDataUrl(dataUrl: string, fileName: string) {
+  const link = document.createElement('a');
+  link.href = dataUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 function QrWithLogo({ qrCode, employeeName, sizeClass = 'w-14 h-14', onClick }: { qrCode?: string; employeeName: string; sizeClass?: string; onClick?: () => void }) {
@@ -143,30 +296,6 @@ function EvidencePhoto({ src, alt, className, onClick }: { src?: string; alt: st
         onError={() => { setIsLoading(false); setFailed(true); }}
         className={`w-full h-full ${className.includes('object-contain') ? 'object-contain' : 'object-cover'} ${onClick ? 'hover:opacity-90 transition-opacity' : ''} ${isLoading ? 'opacity-0' : 'opacity-100'}`}
       />
-    </div>
-  );
-}
-
-function HiddenToken({ value, compact = false }: { value?: string; compact?: boolean }) {
-  const [visible, setVisible] = useState(false);
-  if (!value) return <span className="text-slate-300">-</span>;
-
-  const masked = value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : '••••••••';
-
-  return (
-    <div className={`flex items-center gap-2 min-w-0 ${compact ? 'max-w-[180px]' : 'w-full'}`}>
-      <span className="text-[10px] font-mono text-slate-400 truncate min-w-0">
-        {visible ? value : masked}
-      </span>
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); setVisible(v => !v); }}
-        className="p-1 rounded-md text-slate-400 hover:text-[#B21B1B] hover:bg-red-50 flex-shrink-0"
-        title={visible ? 'Sembunyikan ID QR' : 'Tampilkan ID QR'}
-        aria-label={visible ? 'Sembunyikan ID QR' : 'Tampilkan ID QR'}
-      >
-        {visible ? <EyeOff size={13} /> : <Eye size={13} />}
-      </button>
     </div>
   );
 }
@@ -431,6 +560,9 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
     setIsSelfieReady(false);
     try {
       await new Promise(resolve => setTimeout(resolve, 100));
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Perangkat ini belum bisa membuka kamera. Gunakan perangkat yang memiliki kamera, lalu coba lagi.');
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
       selfieStreamRef.current = stream;
       if (selfieVideoRef.current) {
@@ -442,18 +574,52 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       }
     } catch (e) {
       setIsSelfieOpen(false);
-      setScanResult({ success: false, message: 'Gagal membuka kamera selfie. Pastikan izin kamera diberikan.' });
+      setScanResult({
+        success: false,
+        message: e instanceof Error
+          ? e.message
+          : 'Kamera belum bisa dibuka. Izinkan akses kamera agar wajah bisa difoto sebagai bukti presensi.'
+      });
     }
   };
 
-  const getCurrentPosition = () => new Promise<GeolocationPosition | null>((resolve) => {
-    if (!navigator.geolocation) return resolve(null);
-    navigator.geolocation.getCurrentPosition(resolve, () => resolve(null), {
+  const getLocationErrorMessage = (error?: GeolocationPositionError) => {
+    if (!navigator.geolocation) {
+      return 'Perangkat ini belum bisa membaca lokasi. Gunakan perangkat yang mendukung lokasi, lalu coba lagi.';
+    }
+    if (error?.code === error.PERMISSION_DENIED) {
+      return 'Presensi membutuhkan izin lokasi. Silakan izinkan lokasi di browser, lalu coba presensi lagi.';
+    }
+    if (error?.code === error.TIMEOUT) {
+      return 'Lokasi belum berhasil ditemukan. Pastikan GPS atau layanan lokasi aktif, lalu coba lagi.';
+    }
+    return 'Lokasi belum bisa dibaca. Pastikan layanan lokasi aktif dan izinnya diberikan, lalu coba lagi.';
+  };
+
+  const getRequiredPosition = () => new Promise<GeolocationPosition>((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error(getLocationErrorMessage()));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(resolve, (error) => reject(new Error(getLocationErrorMessage(error))), {
       enableHighAccuracy: true,
       timeout: 10000,
       maximumAge: 0
     });
   });
+
+  const ensureLocationBeforeScan = async () => {
+    try {
+      await getRequiredPosition();
+      return true;
+    } catch (error) {
+      setScanResult({
+        success: false,
+        message: error instanceof Error ? error.message : 'Presensi membutuhkan izin lokasi. Silakan izinkan lokasi, lalu coba lagi.'
+      });
+      return false;
+    }
+  };
 
   const captureSelfieDataUrl = () => {
     const video = selfieVideoRef.current;
@@ -498,11 +664,14 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
   }, [shift, hasCheckedIn, presensiType, shifts, settings]);
 
   const startScanner = async () => {
+    const locationAllowed = await ensureLocationBeforeScan();
+    if (!locationAllowed) return;
+
     setIsScanning(true);
     setTimeout(async () => {
       if (!videoRef.current) {
         setIsScanning(false);
-        setScanResult({ success: false, message: 'Video element tidak siap. Coba ulangi.' });
+        setScanResult({ success: false, message: 'Kamera belum siap. Silakan coba buka scan lagi.' });
         return;
       }
       try {
@@ -535,7 +704,7 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
         console.error("Unable to start scanning", err);
         scannerRef.current = null;
         setIsScanning(false);
-        setScanResult({ success: false, message: 'Gagal mengakses kamera. Pastikan izin kamera diberikan dan perangkat memiliki kamera belakang.' });
+        setScanResult({ success: false, message: 'Kamera belum bisa dibuka. Izinkan akses kamera agar QR pegawai bisa discan.' });
       }
     }, 100);
   };
@@ -637,8 +806,18 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
     }
 
     setIsProcessing(true);
+    let position: GeolocationPosition;
+    try {
+      position = await getRequiredPosition();
+    } catch (error) {
+      setIsProcessing(false);
+      setScanResult({
+        success: false,
+        message: error instanceof Error ? error.message : 'Presensi membutuhkan izin lokasi. Silakan izinkan lokasi, lalu coba lagi.'
+      });
+      return;
+    }
     stopSelfieCamera();
-    const position = await getCurrentPosition();
 
     const now = new Date();
     const isCheckIn = presensiType === 'masuk';
@@ -652,8 +831,8 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
           Status: isLate ? 'Terlambat' : 'Tepat Waktu',
           Note: note,
           PhotoDataUrl: photoDataUrl,
-          Latitude: position?.coords.latitude ?? null,
-          Longitude: position?.coords.longitude ?? null
+          Latitude: position.coords.latitude,
+          Longitude: position.coords.longitude
         }
       : {
           Date: format(now, 'yyyy-MM-dd'),
@@ -662,8 +841,8 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
           Shift: attendanceShift,
           TimeOut: format(now, 'HH.mm'),
           PhotoDataUrl: photoDataUrl,
-          Latitude: position?.coords.latitude ?? null,
-          Longitude: position?.coords.longitude ?? null
+          Latitude: position.coords.latitude,
+          Longitude: position.coords.longitude
         };
 
     try {
@@ -1208,6 +1387,10 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   // Settings
   const [newId, setNewId] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [cleanupEnabled, setCleanupEnabled] = useState(false);
+  const [cleanupDays, setCleanupDays] = useState('90');
+  const [savingCleanup, setSavingCleanup] = useState(false);
+  const [runningCleanup, setRunningCleanup] = useState(false);
 
   const handleLogout = async () => {
     await api.logout();
@@ -1216,6 +1399,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
 
   useEffect(() => {
     fetchData();
+    fetchAdminSettings();
   }, []);
 
   const fetchData = async () => {
@@ -1230,6 +1414,12 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchAdminSettings = async () => {
+    const settings = await api.getSettings();
+    setCleanupEnabled(settings.attendance_cleanup_enabled === 'true');
+    setCleanupDays(settings.attendance_cleanup_days || '90');
   };
 
   const parseDateStr = (dateVal: any): string => {
@@ -1301,6 +1491,47 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
       setTimeout(() => handleLogout(), 1500);
     } else {
       showToast(result.message || 'Gagal mengubah kredensial', 'error');
+    }
+  };
+
+  const normalizedCleanupDays = () => {
+    const days = parseInt(cleanupDays, 10);
+    if (!Number.isFinite(days) || days < 1) return 90;
+    return Math.min(days, 3650);
+  };
+
+  const handleSaveCleanupSettings = async () => {
+    setSavingCleanup(true);
+    try {
+      const days = normalizedCleanupDays();
+      const result = await api.updateSettings({
+        attendance_cleanup_enabled: cleanupEnabled ? 'true' : 'false',
+        attendance_cleanup_days: String(days)
+      });
+      if (result.success) {
+        setCleanupDays(String(days));
+        showToast('Pengaturan pembersihan berhasil disimpan', 'success');
+      } else {
+        showToast(result.message || 'Pengaturan belum berhasil disimpan', 'error');
+      }
+    } finally {
+      setSavingCleanup(false);
+    }
+  };
+
+  const handleRunCleanupNow = async () => {
+    setRunningCleanup(true);
+    try {
+      const days = normalizedCleanupDays();
+      const result = await api.runAttendanceCleanup(days);
+      if (result.success) {
+        showToast(result.message || 'Pembersihan bukti foto lama selesai', 'success');
+        await fetchData();
+      } else {
+        showToast(result.message || 'Bukti foto lama belum berhasil dibersihkan', 'error');
+      }
+    } finally {
+      setRunningCleanup(false);
     }
   };
 
@@ -1580,7 +1811,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
               )}
 
               {activeTab === 'settings' && (
-                <div className="max-w-2xl mx-auto space-y-6">
+                <div className="max-w-3xl mx-auto space-y-6">
                   <div className="mb-8">
                     <h2 className="text-2xl font-black text-slate-800">Pengaturan Admin</h2>
                     <p className="text-slate-500 text-sm mt-1">Kelola kredensial akses dashboard admin dan preferensi sistem.</p>
@@ -1632,6 +1863,66 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                       >
                         SIMPAN PERUBAHAN
                       </button>
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
+                    <div className="flex items-center gap-4 mb-8 pb-6 border-b border-slate-100">
+                      <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center text-[#B21B1B]">
+                        <Trash2 size={24} />
+                      </div>
+                      <div>
+                        <h3 className="font-extrabold text-slate-800 text-lg">Pembersihan Foto Presensi</h3>
+                        <p className="text-xs font-medium text-slate-500">Hapus otomatis bukti foto lama dari penyimpanan. Riwayat presensi tetap tersimpan.</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-6">
+                      <label className="flex items-center justify-between gap-4 p-4 rounded-2xl bg-slate-50 border border-slate-100 cursor-pointer">
+                        <div>
+                          <div className="font-bold text-slate-800">Aktifkan pembersihan otomatis</div>
+                          <div className="text-xs text-slate-500 mt-1">Sistem akan membersihkan bukti foto lama setiap hari saat server berjalan.</div>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={cleanupEnabled}
+                          onChange={e => setCleanupEnabled(e.target.checked)}
+                          className="w-5 h-5 accent-[#B21B1B]"
+                        />
+                      </label>
+
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Simpan bukti foto selama</label>
+                        <div className="relative">
+                          <input
+                            type="number"
+                            min="1"
+                            max="3650"
+                            value={cleanupDays}
+                            onChange={e => setCleanupDays(e.target.value)}
+                            className="w-full pr-16 pl-4 py-4 rounded-xl border border-slate-200 bg-slate-50 text-sm font-medium focus:ring-2 focus:ring-[#B21B1B]/20 outline-none transition-all"
+                          />
+                          <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">hari</span>
+                        </div>
+                        <p className="text-xs text-slate-500">Bukti foto yang lebih lama dari jumlah hari ini akan dihapus. Data presensi tetap ada di riwayat.</p>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button
+                          onClick={handleSaveCleanupSettings}
+                          disabled={savingCleanup}
+                          className="w-full bg-[#B21B1B] text-white py-4 rounded-xl font-bold shadow-lg shadow-red-900/20 hover:bg-[#901515] transition-all active:scale-[0.98] disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
+                        >
+                          {savingCleanup ? 'MENYIMPAN...' : 'SIMPAN PENGATURAN'}
+                        </button>
+                        <button
+                          onClick={handleRunCleanupNow}
+                          disabled={runningCleanup}
+                          className="w-full bg-slate-100 text-slate-700 py-4 rounded-xl font-bold hover:bg-slate-200 transition-all active:scale-[0.98] disabled:text-slate-400"
+                        >
+                          {runningCleanup ? 'MEMBERSIHKAN...' : 'BERSIHKAN SEKARANG'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1854,7 +2145,7 @@ function AttendancePhotosView({ onChanged }: { onChanged: () => void }) {
   const photoKey = (photo: AttendancePhoto) => `${photo.attendanceId}-${photo.type}`;
 
   const handleDelete = (photo: AttendancePhoto) => {
-    showConfirm(`Hapus foto presensi ${photo.type} milik "${photo.name}"?\n\nAsset juga akan dihapus dari CDN.`, async () => {
+    showConfirm(`Hapus foto presensi ${photo.type} milik "${photo.name}"?\n\nBukti foto juga akan dihapus dari penyimpanan.`, async () => {
       const key = photoKey(photo);
       setDeletingPhotoKey(key);
       try {
@@ -1886,7 +2177,7 @@ function AttendancePhotosView({ onChanged }: { onChanged: () => void }) {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-200 pb-6">
         <div>
           <h2 className="text-2xl font-black text-slate-800">Foto Presensi</h2>
-          <p className="text-slate-500 text-sm mt-1">Kelola bukti foto presensi yang tersimpan di CDN.</p>
+          <p className="text-slate-500 text-sm mt-1">Kelola bukti foto presensi yang tersimpan di penyimpanan foto.</p>
         </div>
         <button onClick={fetchPhotos} className="px-4 py-2 rounded-xl bg-red-50 text-[#B21B1B] text-xs font-bold hover:bg-red-100">
           Refresh
@@ -1989,6 +2280,8 @@ function MasterDataView() {
   const [newEmpPhotoPreview, setNewEmpPhotoPreview] = useState('');
   const [selectedQrEmployee, setSelectedQrEmployee] = useState<Employee | null>(null);
   const [savingQrName, setSavingQrName] = useState<string | null>(null);
+  const [downloadingQrName, setDownloadingQrName] = useState<string | null>(null);
+  const [uploadingPhotoName, setUploadingPhotoName] = useState<string | null>(null);
   const [newLocation, setNewLocation] = useState('');
   const [newShiftName, setNewShiftName] = useState('');
   const [newShiftTime, setNewShiftTime] = useState('08:00');
@@ -2033,7 +2326,7 @@ function MasterDataView() {
 
   const handleEmployeePhotoChange = async (file?: File) => {
     if (!file) return;
-    const dataUrl = await fileToDataUrl(file);
+    const dataUrl = await imageFileToCompressedDataUrl(file);
     setNewEmpPhotoDataUrl(dataUrl);
     setNewEmpPhotoPreview(dataUrl);
   };
@@ -2041,6 +2334,25 @@ function MasterDataView() {
   const handleUpdateEmployeeStatus = async (name: string, status: string) => {
     await api.updateEmployee(name, status);
     fetchAll();
+  };
+
+  const handleUpdateEmployeePhoto = async (name: string, file?: File) => {
+    if (!file) return;
+    setUploadingPhotoName(name);
+    try {
+      const photoDataUrl = await imageFileToCompressedDataUrl(file);
+      const result = await api.updateEmployeePhoto(name, photoDataUrl);
+      if (result.success) {
+        showToast('Foto pegawai berhasil diperbarui', 'success');
+        await fetchAll();
+      } else {
+        showToast(result.message || 'Foto pegawai belum berhasil diperbarui', 'error');
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Foto pegawai belum berhasil diperbarui', 'error');
+    } finally {
+      setUploadingPhotoName(null);
+    }
   };
 
   const handleDeleteEmployee = async (name: string) => {
@@ -2058,16 +2370,33 @@ function MasterDataView() {
       const qrDataUrl = await createStyledQrDataUrl(employee.qr_code);
       const result = await api.saveEmployeeQrImage(employee.name, qrDataUrl);
       if (result.success) {
-        showToast('QR berlogo berhasil disimpan ke CDN', 'success');
+        showToast('QR berhasil disimpan', 'success');
         await fetchAll();
         setSelectedQrEmployee(prev => prev?.name === employee.name ? { ...prev, qr_url: result.qr_url, qr_file_id: result.qr_file_id } : prev);
       } else {
-        showToast(result.message || 'Gagal menyimpan QR ke CDN', 'error');
+        showToast(result.message || 'Gagal menyimpan QR', 'error');
       }
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Gagal membuat QR berlogo', 'error');
     } finally {
       setSavingQrName(null);
+    }
+  };
+
+  const handleDownloadEmployeeQr = async (employee: Employee) => {
+    if (!employee.qr_code) {
+      showToast('QR pegawai belum tersedia', 'error');
+      return;
+    }
+    setDownloadingQrName(employee.name);
+    try {
+      const dataUrl = await createEmployeeQrDownloadDataUrl(employee);
+      downloadDataUrl(dataUrl, `qr-presensi-${sanitizeFileName(employee.name)}.png`);
+      showToast('QR berhasil diunduh', 'success');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Gagal mengunduh QR', 'error');
+    } finally {
+      setDownloadingQrName(null);
     }
   };
 
@@ -2217,9 +2546,13 @@ function MasterDataView() {
                 <div key={emp.name} className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-slate-50/50">
                   <div className="flex items-center gap-3 min-w-0 flex-1">
                     <span className="text-slate-400 text-xs font-medium w-5 flex-shrink-0">{i + 1}</span>
-                    <div className="w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden">
+                    <label className={`relative w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden cursor-pointer ${uploadingPhotoName === emp.name ? 'pointer-events-none' : ''}`} title="Ganti foto pegawai">
                       {emp.photo_url ? <img src={emp.photo_url} alt={emp.name} className="w-full h-full object-cover" /> : <User size={16} className="text-slate-500" />}
-                    </div>
+                      <span className={`absolute inset-0 bg-black/35 transition-opacity flex items-center justify-center text-white ${uploadingPhotoName === emp.name ? 'opacity-100' : 'opacity-0 hover:opacity-100'}`}>
+                        {uploadingPhotoName === emp.name ? <div className="w-4 h-4 border-2 border-white/50 border-t-white rounded-full animate-spin" /> : <Camera size={13} />}
+                      </span>
+                      <input type="file" accept="image/*" className="hidden" onChange={e => handleUpdateEmployeePhoto(emp.name, e.target.files?.[0])} />
+                    </label>
                     <span className="font-bold text-slate-800 truncate">{emp.name}</span>
                     {emp.qr_code && <QrWithLogo qrCode={emp.qr_code} employeeName={emp.name} sizeClass="w-9 h-9" onClick={() => setSelectedQrEmployee(emp)} />}
                   </div>
@@ -2269,8 +2602,15 @@ function MasterDataView() {
                     <tr key={emp.name} className="hover:bg-slate-50/50 transition-colors text-sm">
                       <td className="px-6 py-4 text-slate-400">{i + 1}</td>
                       <td className="px-6 py-4">
-                        <div className="w-12 h-12 rounded-xl overflow-hidden bg-slate-100 flex items-center justify-center border border-slate-200">
+                        <label className={`group relative w-12 h-12 rounded-xl overflow-hidden bg-slate-100 flex items-center justify-center border border-slate-200 cursor-pointer ${uploadingPhotoName === emp.name ? 'pointer-events-none' : ''}`} title="Ganti foto pegawai">
                           {emp.photo_url ? <img src={emp.photo_url} alt={emp.name} className="w-full h-full object-cover" /> : <User size={18} className="text-slate-400" />}
+                          <span className={`absolute inset-0 bg-black/40 transition-opacity flex items-center justify-center text-white ${uploadingPhotoName === emp.name ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                            {uploadingPhotoName === emp.name ? <div className="w-5 h-5 border-2 border-white/50 border-t-white rounded-full animate-spin" /> : <Camera size={16} />}
+                          </span>
+                          <input type="file" accept="image/*" className="hidden" onChange={e => handleUpdateEmployeePhoto(emp.name, e.target.files?.[0])} />
+                        </label>
+                        <div className="text-[10px] text-slate-400 mt-1 font-medium">
+                          {uploadingPhotoName === emp.name ? 'Mengunggah...' : 'Klik foto untuk ganti'}
                         </div>
                       </td>
                       <td className="px-6 py-4 font-bold text-slate-800">{emp.name}</td>
@@ -2278,7 +2618,7 @@ function MasterDataView() {
                         {emp.qr_code ? (
                           <div className="inline-flex items-center gap-3">
                             <QrWithLogo qrCode={emp.qr_code} employeeName={emp.name} sizeClass="w-16 h-16" onClick={() => setSelectedQrEmployee(emp)} />
-                            <HiddenToken value={emp.qr_code} compact />
+                            <span className="text-xs font-bold text-slate-400">Klik QR untuk preview</span>
                           </div>
                         ) : <span className="text-slate-300">-</span>}
                       </td>
@@ -2493,7 +2833,7 @@ function MasterDataView() {
             <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="font-extrabold text-slate-800 truncate">{selectedQrEmployee.name}</div>
-                <HiddenToken value={selectedQrEmployee.qr_code} />
+                <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 truncate">QR Presensi Pegawai</div>
               </div>
               <button onClick={() => setSelectedQrEmployee(null)} className="p-2 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200">
                 <X size={18} />
@@ -2501,30 +2841,56 @@ function MasterDataView() {
             </div>
             <div className="p-6 flex flex-col items-center gap-4">
               <QrWithLogo qrCode={selectedQrEmployee.qr_code} employeeName={selectedQrEmployee.name} sizeClass="w-64 h-64" />
-              <button
-                onClick={() => handleSaveQrToCdn(selectedQrEmployee)}
-                disabled={savingQrName === selectedQrEmployee.name}
-                className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
-                  savingQrName === selectedQrEmployee.name
-                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                    : 'bg-[#B21B1B] text-white hover:bg-[#901515]'
-                }`}
-              >
-                {savingQrName === selectedQrEmployee.name ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-slate-300 border-t-[#B21B1B] rounded-full animate-spin" />
-                    Menyimpan ke CDN...
-                  </>
-                ) : (
-                  <>
-                    <Upload size={16} />
-                    Simpan QR ke CDN
-                  </>
-                )}
-              </button>
+              <div className="w-full rounded-xl bg-slate-50 border border-slate-100 p-3 text-xs text-slate-600 leading-relaxed">
+                QR ini khusus untuk presensi pegawai tersebut. Jangan dibagikan ke pegawai lain.
+              </div>
+              <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  onClick={() => handleDownloadEmployeeQr(selectedQrEmployee)}
+                  disabled={downloadingQrName === selectedQrEmployee.name}
+                  className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
+                    downloadingQrName === selectedQrEmployee.name
+                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {downloadingQrName === selectedQrEmployee.name ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-slate-300 border-t-[#B21B1B] rounded-full animate-spin" />
+                      Menyiapkan...
+                    </>
+                  ) : (
+                    <>
+                      <Download size={16} />
+                      Download QR
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => handleSaveQrToCdn(selectedQrEmployee)}
+                  disabled={savingQrName === selectedQrEmployee.name}
+                  className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
+                    savingQrName === selectedQrEmployee.name
+                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                      : 'bg-[#B21B1B] text-white hover:bg-[#901515]'
+                  }`}
+                >
+                  {savingQrName === selectedQrEmployee.name ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-slate-300 border-t-[#B21B1B] rounded-full animate-spin" />
+                      Menyimpan QR...
+                    </>
+                  ) : (
+                    <>
+                      <Upload size={16} />
+                      Simpan QR
+                    </>
+                  )}
+                </button>
+              </div>
               {selectedQrEmployee.qr_url && (
                 <div className="text-[10px] text-green-600 font-bold uppercase tracking-widest">
-                  QR sudah tersimpan di CDN
+                  QR sudah tersimpan
                 </div>
               )}
             </div>

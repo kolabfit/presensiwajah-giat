@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db/connection');
+const { runAttendanceCleanup } = require('../services/attendanceCleanup');
 
 /**
  * GET /api/settings
@@ -38,6 +39,24 @@ router.put('/', async (req, res) => {
   } catch (error) {
     console.error('Error updating settings:', error);
     res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /api/settings/attendance-cleanup/run
+ * Jalankan pembersihan data presensi lama secara manual.
+ */
+router.post('/attendance-cleanup/run', async (req, res) => {
+  try {
+    const { retentionDays } = req.body || {};
+    const result = await runAttendanceCleanup({ force: true, retentionDays });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Error running attendance cleanup:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Data lama belum berhasil dibersihkan. Silakan coba lagi.'
+    });
   }
 });
 

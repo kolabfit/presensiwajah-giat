@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db/connection');
-const { uploadDataUrl, deleteAsset, CDN_BASE_URL } = require('../services/cdn');
+const { uploadDataUrl, deleteAsset, CDN_BASE_URL, isLocalAssetId, localAssetUrl } = require('../services/cdn');
 
 function photoViewUrl(fileId) {
   return fileId ? `${CDN_BASE_URL}/api/bridge/view/${fileId}` : '';
@@ -12,6 +12,7 @@ function appBaseUrl(req) {
 }
 
 function proxiedPhotoUrl(req, fileId) {
+  if (isLocalAssetId(fileId)) return `${appBaseUrl(req)}${localAssetUrl(fileId)}`;
   return fileId ? `${appBaseUrl(req)}/api/attendance/photos/view/${encodeURIComponent(fileId)}` : '';
 }
 
@@ -32,12 +33,25 @@ function normalizePhotoUrl(req, storedUrl, fileId) {
   if (fileId) return proxiedPhotoUrl(req, fileId);
 
   const url = String(storedUrl || '').trim();
+  if (url.startsWith('/uploads/')) return `${appBaseUrl(req)}${url}`;
+
   const driveId = extractGoogleDriveId(url);
   if (driveId) {
     return `https://drive.google.com/thumbnail?id=${encodeURIComponent(driveId)}&sz=w1000`;
   }
 
   return url || photoViewUrl(fileId);
+}
+
+function extractAssetIdFromUrl(url) {
+  const raw = String(url || '');
+  const cdnMatch = raw.match(/\/api\/bridge\/view\/([^/?#]+)/);
+  if (cdnMatch) return decodeURIComponent(cdnMatch[1]);
+
+  const localMatch = raw.match(/\/uploads\/([^/?#]+)/);
+  if (localMatch) return `local:${decodeURIComponent(localMatch[1])}`;
+
+  return '';
 }
 
 function inferImageMime(buffer, fallbackType) {
@@ -278,16 +292,17 @@ router.delete('/photos/:attendanceId/:type', async (req, res) => {
     const latColumn = isCheckOut ? 'check_out_latitude' : 'check_in_latitude';
     const lngColumn = isCheckOut ? 'check_out_longitude' : 'check_in_longitude';
 
-    const [rows] = await pool.query(`SELECT ${fileColumn} AS file_id FROM attendance WHERE id = ?`, [attendanceId]);
+    const [rows] = await pool.query(`SELECT ${fileColumn} AS file_id, ${urlColumn} AS photo_url FROM attendance WHERE id = ?`, [attendanceId]);
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Data presensi tidak ditemukan' });
     }
 
-    if (rows[0].file_id) {
+    const assetId = rows[0].file_id || extractAssetIdFromUrl(rows[0].photo_url);
+    if (assetId) {
       try {
-        await deleteAsset(rows[0].file_id);
+        await deleteAsset(assetId);
       } catch (error) {
-        console.error('Error deleting CDN asset, clearing database reference only:', error.message);
+        console.error('Error deleting photo asset, clearing database reference only:', error.message);
       }
     }
 

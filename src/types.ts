@@ -57,5 +57,7 @@ export interface AttendancePhoto {
 export interface AppSettings {
   barcode_content: string;
   late_threshold_minutes: string;
-  [key: string]: string;
+  attendance_cleanup_enabled?: string;
+  attendance_cleanup_days?: string;
+  [key: string]: string | undefined;
 }

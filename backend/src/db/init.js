@@ -157,6 +157,13 @@ async function initDatabase() {
       console.log('✅ Default app_settings ditambahkan.');
     }
 
+    await connection.query(
+      "INSERT IGNORE INTO app_settings (`key`, value) VALUES ('attendance_cleanup_enabled', 'false')"
+    );
+    await connection.query(
+      "INSERT IGNORE INTO app_settings (`key`, value) VALUES ('attendance_cleanup_days', '90')"
+    );
+
     // Seed admin_config — wajib agar admin bisa login pertama kali
     const [adminRows] = await connection.query('SELECT COUNT(*) as count FROM admin_config');
     if (adminRows[0].count === 0) {

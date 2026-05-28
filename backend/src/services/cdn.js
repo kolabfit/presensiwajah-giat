@@ -1,5 +1,11 @@
+const fs = require('fs/promises');
+const path = require('path');
+const crypto = require('crypto');
+
 const CDN_BASE_URL = process.env.CDN_BASE_URL || 'https://api-cdn.kroombox.com';
 const CDN_PROJECT_NAME = process.env.CDN_PROJECT_NAME || 'GIAT Presensi';
+const UPLOADS_DIR = path.resolve(__dirname, '../../uploads');
+const LOCAL_ASSET_PREFIX = 'local:';
 
 function getApiKey() {
   return process.env.CDN_API_KEY || process.env.CDNKROOMBOX_API_KEY || '';
@@ -26,6 +32,60 @@ function dataUrlToBlob(dataUrl) {
   return { buffer, mimeType };
 }
 
+function extensionFromMime(mimeType) {
+  if (mimeType === 'image/png') return '.png';
+  if (mimeType === 'image/webp') return '.webp';
+  if (mimeType === 'image/gif') return '.gif';
+  if (mimeType === 'application/pdf') return '.pdf';
+  return '.jpg';
+}
+
+function sanitizeFileName(fileName) {
+  const parsed = path.parse(String(fileName || 'asset'));
+  const base = parsed.name
+    .replace(/[^a-z0-9-_]+/gi, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase() || 'asset';
+  return `${base}${parsed.ext || ''}`;
+}
+
+function localAssetId(fileName) {
+  return `${LOCAL_ASSET_PREFIX}${fileName}`;
+}
+
+function isLocalAssetId(fileId) {
+  return String(fileId || '').startsWith(LOCAL_ASSET_PREFIX);
+}
+
+function localFileNameFromId(fileId) {
+  if (!isLocalAssetId(fileId)) return '';
+  return path.basename(String(fileId).slice(LOCAL_ASSET_PREFIX.length));
+}
+
+function localAssetUrl(fileId) {
+  const fileName = localFileNameFromId(fileId);
+  return fileName ? `/uploads/${encodeURIComponent(fileName)}` : '';
+}
+
+async function saveLocalAsset(buffer, mimeType, fileName) {
+  await fs.mkdir(UPLOADS_DIR, { recursive: true });
+  const sanitized = sanitizeFileName(fileName);
+  const ext = path.extname(sanitized) || extensionFromMime(mimeType);
+  const base = path.basename(sanitized, path.extname(sanitized));
+  const finalName = `${Date.now()}-${crypto.randomUUID()}-${base}${ext}`;
+  await fs.writeFile(path.join(UPLOADS_DIR, finalName), buffer);
+  const fileId = localAssetId(finalName);
+
+  return {
+    fileId,
+    status: 'ready',
+    tracking: '',
+    url: localAssetUrl(fileId),
+    storage: 'local'
+  };
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -49,12 +109,16 @@ async function fetchWithTimeout(url, options, timeoutMs = 20000) {
 async function uploadDataUrl(dataUrl, fileName, options = {}) {
   const apiKey = getApiKey();
   const jwtToken = process.env.CDN_JWT_TOKEN || '';
-  if (!apiKey && !jwtToken) {
-    throw new Error('CDN_API_KEY atau CDN_JWT_TOKEN belum diisi di .env backend');
-  }
-
+  const allowLocalFallback = options.localFallback !== false;
   const maxAttempts = options.maxAttempts || 3;
   const { buffer, mimeType } = dataUrlToBlob(dataUrl);
+
+  if (!apiKey && !jwtToken) {
+    if (allowLocalFallback) {
+      return await saveLocalAsset(buffer, mimeType, fileName);
+    }
+    throw new Error('CDN_API_KEY atau CDN_JWT_TOKEN belum diisi di .env backend');
+  }
 
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -89,6 +153,11 @@ async function uploadDataUrl(dataUrl, fileName, options = {}) {
     }
   }
 
+  if (allowLocalFallback) {
+    console.error('Penyimpanan utama gagal, memakai folder uploads lokal:', lastError?.message || lastError);
+    return await saveLocalAsset(buffer, mimeType, fileName);
+  }
+
   const friendlyError = new Error('Upload foto bukti belum berhasil karena koneksi ke penyimpanan foto sedang tidak stabil. Silakan coba proses presensi lagi.');
   friendlyError.cause = lastError;
   friendlyError.isCdnUploadError = true;
@@ -96,6 +165,15 @@ async function uploadDataUrl(dataUrl, fileName, options = {}) {
 }
 
 async function deleteAsset(fileId) {
+  if (isLocalAssetId(fileId)) {
+    const fileName = localFileNameFromId(fileId);
+    if (!fileName) return;
+    await fs.unlink(path.join(UPLOADS_DIR, fileName)).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    return;
+  }
+
   const apiKey = getApiKey();
   const jwtToken = process.env.CDN_JWT_TOKEN || '';
   if ((!apiKey && !jwtToken) || !fileId) return;
@@ -114,5 +192,9 @@ async function deleteAsset(fileId) {
 module.exports = {
   uploadDataUrl,
   deleteAsset,
-  CDN_BASE_URL
+  CDN_BASE_URL,
+  UPLOADS_DIR,
+  LOCAL_ASSET_PREFIX,
+  isLocalAssetId,
+  localAssetUrl
 };
