@@ -31,7 +31,9 @@ DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=your_password
 DB_NAME=presensi_giat
-FRONTEND_URL=http://localhost:3000
+CDN_BASE_URL=https://api-cdn.kroombox.com
+CDN_PROJECT_NAME=presensi
+CDN_API_KEY=your_cdn_api_key
 ```
 
 ### 3. Inisialisasi database
@@ -70,14 +72,14 @@ Server akan berjalan di `http://localhost:5000`.
 
 ```
 backend/
+├── models/              # Model face recognition
 ├── src/
 │   ├── index.js          # Entry point & Express setup
 │   ├── db/
 │   │   ├── connection.js # MySQL connection pool
 │   │   └── init.js       # Database initialization script
-│   └── routes/
-│       ├── attendance.js # Endpoint presensi
-│       └── admin.js      # Endpoint admin
+│   ├── routes/           # Endpoint API
+│   └── services/         # CDN, cleanup, face recognition
 ├── .env.example
 ├── .gitignore
 ├── package.json

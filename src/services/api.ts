@@ -1,9 +1,42 @@
-import { AttendanceData, AdminConfig, Employee, AppSettings, AttendancePhoto } from '../types';
+import { AttendanceData, AdminConfig, Employee, AppSettings, AttendancePhoto, Location, EmployeeLocation } from '../types';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5045/api';
+const API_RETRY_ATTEMPTS = 3;
+const API_RETRY_DELAY_MS = 400;
 
 // Token management
 let authToken: string | null = localStorage.getItem('admin_token');
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function shouldRetryResponse(status: number) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+async function fetchWithRetry(input: RequestInfo | URL, init?: RequestInit, attempts = API_RETRY_ATTEMPTS) {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await window.fetch(input, init);
+      if (!shouldRetryResponse(response.status) || attempt === attempts) {
+        return response;
+      }
+      lastError = new Error(`API returned ${response.status}`);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) {
+        throw error;
+      }
+    }
+
+    await sleep(API_RETRY_DELAY_MS * attempt);
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Gagal menghubungkan ke server');
+}
 
 function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -17,7 +50,7 @@ export const api = {
   // === Admin Auth ===
   async login(id: string, password: string): Promise<{ success: boolean; message?: string; token?: string }> {
     try {
-      const res = await fetch(`${API_URL}/admin/login`, {
+      const res = await fetchWithRetry(`${API_URL}/admin/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, password })
@@ -36,7 +69,7 @@ export const api = {
 
   async logout() {
     try {
-      await fetch(`${API_URL}/admin/logout`, {
+      await fetchWithRetry(`${API_URL}/admin/logout`, {
         method: 'POST',
         headers: getAuthHeaders()
       });
@@ -49,7 +82,7 @@ export const api = {
 
   async verifyToken(): Promise<boolean> {
     try {
-      const res = await fetch(`${API_URL}/admin/verify`, {
+      const res = await fetchWithRetry(`${API_URL}/admin/verify`, {
         headers: getAuthHeaders()
       });
       return res.ok;
@@ -59,7 +92,7 @@ export const api = {
   },
 
   async updateAdminConfig(config: AdminConfig) {
-    const res = await fetch(`${API_URL}/admin/update-password`, {
+    const res = await fetchWithRetry(`${API_URL}/admin/update-password`, {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(config)
@@ -68,15 +101,39 @@ export const api = {
   },
 
   // === Attendance ===
+  async recognizeAttendanceFace(photoDataUrl: string): Promise<{ success?: boolean; message?: string; employee?: { name: string; photo_url?: string }; face?: { distance: number } }> {
+    try {
+      const res = await fetchWithRetry(`${API_URL}/attendance/recognize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ photoDataUrl })
+      });
+      const text = await res.text();
+      let payload: { success?: boolean; message?: string; employee?: { name: string; photo_url?: string }; face?: { distance: number } } = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch (e) {
+        payload = {};
+      }
+      if (!res.ok) {
+        return { success: false, message: payload.message || 'Wajah belum berhasil dikenali.' };
+      }
+      return payload;
+    } catch (e) {
+      console.error(e);
+      return { success: false, message: 'Tidak bisa terhubung ke server pengenalan wajah.' };
+    }
+  },
+
   async saveAttendance(data: Partial<AttendanceData>) {
     try {
-      const res = await fetch(`${API_URL}/attendance`, {
+      const res = await fetchWithRetry(`${API_URL}/attendance`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ data })
       });
       const text = await res.text();
-      let payload: { success?: boolean; message?: string } = {};
+      let payload: { success?: boolean; message?: string; employee?: { name: string }; face?: { distance: number } } = {};
       try {
         payload = text ? JSON.parse(text) : {};
       } catch (e) {
@@ -102,7 +159,7 @@ export const api = {
 
   async getAttendanceHistory(): Promise<AttendanceData[]> {
     try {
-      const res = await fetch(`${API_URL}/attendance`);
+      const res = await fetchWithRetry(`${API_URL}/attendance`);
       return await res.json();
     } catch (e) {
       console.error(e);
@@ -112,7 +169,7 @@ export const api = {
 
   async getAttendancePhotos(): Promise<AttendancePhoto[]> {
     try {
-      const res = await fetch(`${API_URL}/attendance/photos`, {
+      const res = await fetchWithRetry(`${API_URL}/attendance/photos`, {
         headers: getAuthHeaders()
       });
       return await res.json();
@@ -123,7 +180,7 @@ export const api = {
   },
 
   async deleteAttendancePhoto(attendanceId: number, type: 'masuk' | 'pulang') {
-    const res = await fetch(`${API_URL}/attendance/photos/${attendanceId}/${type}`, {
+    const res = await fetchWithRetry(`${API_URL}/attendance/photos/${attendanceId}/${type}`, {
       method: 'DELETE',
       headers: getAuthHeaders()
     });
@@ -133,7 +190,7 @@ export const api = {
   // === Employees ===
   async getEmployees(): Promise<Employee[]> {
     try {
-      const res = await fetch(`${API_URL}/employees`);
+      const res = await fetchWithRetry(`${API_URL}/employees`);
       return await res.json();
     } catch (e) {
       console.error(e);
@@ -142,7 +199,7 @@ export const api = {
   },
 
   async addEmployee(data: Partial<Employee>) {
-    const res = await fetch(`${API_URL}/employees`, {
+    const res = await fetchWithRetry(`${API_URL}/employees`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -150,50 +207,27 @@ export const api = {
     return await res.json();
   },
 
-  async getEmployeeByQr(qrCode: string): Promise<{ success: boolean; message?: string; employee?: Employee }> {
+  async registerFace(employeeName: string, photos: string[]) {
+    const res = await fetchWithRetry(`${API_URL}/face/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ employeeName, photos })
+    });
+    const text = await res.text();
     try {
-      const cleanQrCode = qrCode.trim();
-      if (!cleanQrCode) {
-        return { success: false, message: 'QR tidak terbaca. Arahkan kamera ke QR pegawai sampai terlihat jelas.' };
-      }
-
-      const res = await fetch(`${API_URL}/employees/qr/${encodeURIComponent(cleanQrCode)}`);
-      const text = await res.text();
-      let data: { success?: boolean; message?: string; employee?: Employee } = {};
-
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch (e) {
-        data = {};
-      }
-
-      if (!res.ok) {
-        return {
-          success: false,
-          message: data.message || (res.status === 404
-            ? 'QR pegawai tidak ditemukan. Pastikan QR berasal dari daftar pegawai aplikasi ini.'
-            : 'QR belum bisa diperiksa. Silakan coba scan ulang.')
-        };
-      }
-
-      return data as { success: boolean; message?: string; employee?: Employee };
+      return text ? JSON.parse(text) : {};
     } catch (e) {
-      console.error(e);
-      return { success: false, message: 'Tidak bisa terhubung ke server. Periksa koneksi lalu coba lagi.' };
+      return {
+        success: false,
+        message: res.status === 413
+          ? 'Ukuran foto terlalu besar. Silakan ulangi dengan kamera lebih dekat atau kualitas lebih kecil.'
+          : 'Registrasi wajah belum berhasil. Silakan coba lagi.'
+      };
     }
   },
 
-  async saveEmployeeQrImage(name: string, qrDataUrl: string) {
-    const res = await fetch(`${API_URL}/employees/${encodeURIComponent(name)}/qr-image`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ qrDataUrl })
-    });
-    return await res.json();
-  },
-
   async updateEmployee(name: string, status: string, photoDataUrl?: string) {
-    const res = await fetch(`${API_URL}/employees/${encodeURIComponent(name)}`, {
+    const res = await fetchWithRetry(`${API_URL}/employees/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status, photoDataUrl })
@@ -212,7 +246,7 @@ export const api = {
   },
 
   async updateEmployeePhoto(name: string, photoDataUrl: string) {
-    const res = await fetch(`${API_URL}/employees/${encodeURIComponent(name)}`, {
+    const res = await fetchWithRetry(`${API_URL}/employees/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ photoDataUrl })
@@ -231,7 +265,7 @@ export const api = {
   },
 
   async deleteEmployee(name: string) {
-    const res = await fetch(`${API_URL}/employees/${encodeURIComponent(name)}`, {
+    const res = await fetchWithRetry(`${API_URL}/employees/${encodeURIComponent(name)}`, {
       method: 'DELETE'
     });
     return await res.json();
@@ -240,7 +274,7 @@ export const api = {
   // === Locations ===
   async getLocations(): Promise<string[]> {
     try {
-      const res = await fetch(`${API_URL}/locations`);
+      const res = await fetchWithRetry(`${API_URL}/locations`);
       return await res.json();
     } catch (e) {
       console.error(e);
@@ -248,18 +282,75 @@ export const api = {
     }
   },
 
-  async addLocation(name: string) {
-    const res = await fetch(`${API_URL}/locations`, {
+  async getAdminLocations(): Promise<Location[]> {
+    try {
+      const res = await fetchWithRetry(`${API_URL}/locations/admin`, {
+        headers: getAuthHeaders()
+      });
+      return await res.json();
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  },
+
+  async addAdminLocation(data: Partial<Location>) {
+    const res = await fetchWithRetry(`${API_URL}/locations`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name })
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data)
     });
     return await res.json();
   },
 
-  async deleteLocation(name: string) {
-    const res = await fetch(`${API_URL}/locations/${encodeURIComponent(name)}`, {
-      method: 'DELETE'
+  async updateAdminLocation(id: number, data: Partial<Location>) {
+    const res = await fetchWithRetry(`${API_URL}/locations/${id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data)
+    });
+    return await res.json();
+  },
+
+  async deleteAdminLocation(id: number) {
+    const res = await fetchWithRetry(`${API_URL}/locations/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders()
+    });
+    return await res.json();
+  },
+
+  async resolveLocation(latitude: number, longitude: number, accuracy: number) {
+    try {
+      const res = await fetchWithRetry(`${API_URL}/locations/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude, longitude, accuracy })
+      });
+      return await res.json();
+    } catch (e) {
+      console.error(e);
+      return { success: false, message: 'Gagal memvalidasi koordinat dengan server.' };
+    }
+  },
+
+  async getEmployeeLocations(id: number | string): Promise<EmployeeLocation[]> {
+    try {
+      const res = await fetchWithRetry(`${API_URL}/employees/${id}/locations`, {
+        headers: getAuthHeaders()
+      });
+      return await res.json();
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  },
+
+  async updateEmployeeLocations(id: number | string, locations: EmployeeLocation[]) {
+    const res = await fetchWithRetry(`${API_URL}/employees/${id}/locations`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ locations })
     });
     return await res.json();
   },
@@ -267,7 +358,7 @@ export const api = {
   // === Shifts ===
   async getShifts(): Promise<Record<string, { start_time: string; end_time: string; is_overtime: boolean }>> {
     try {
-      const res = await fetch(`${API_URL}/shifts`);
+      const res = await fetchWithRetry(`${API_URL}/shifts`);
       return await res.json();
     } catch (e) {
       console.error(e);
@@ -276,7 +367,7 @@ export const api = {
   },
 
   async addShift(name: string, start_time: string, end_time: string, is_overtime: boolean = false) {
-    const res = await fetch(`${API_URL}/shifts`, {
+    const res = await fetchWithRetry(`${API_URL}/shifts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, start_time, end_time, is_overtime })
@@ -285,7 +376,7 @@ export const api = {
   },
 
   async updateShift(name: string, start_time: string, end_time: string, is_overtime: boolean = false) {
-    const res = await fetch(`${API_URL}/shifts/${encodeURIComponent(name)}`, {
+    const res = await fetchWithRetry(`${API_URL}/shifts/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ start_time, end_time, is_overtime })
@@ -294,7 +385,7 @@ export const api = {
   },
 
   async deleteShift(name: string) {
-    const res = await fetch(`${API_URL}/shifts/${encodeURIComponent(name)}`, {
+    const res = await fetchWithRetry(`${API_URL}/shifts/${encodeURIComponent(name)}`, {
       method: 'DELETE'
     });
     return await res.json();
@@ -303,16 +394,16 @@ export const api = {
   // === Settings ===
   async getSettings(): Promise<AppSettings> {
     try {
-      const res = await fetch(`${API_URL}/settings`);
+      const res = await fetchWithRetry(`${API_URL}/settings`);
       return await res.json();
     } catch (e) {
       console.error(e);
-      return { barcode_content: 'KOPERASI GIAT', late_threshold_minutes: '6' };
+      return { barcode_content: 'KOPERASI GIAT', late_threshold_minutes: '5' };
     }
   },
 
   async updateSettings(settings: Partial<AppSettings>) {
-    const res = await fetch(`${API_URL}/settings`, {
+    const res = await fetchWithRetry(`${API_URL}/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings)
@@ -321,7 +412,7 @@ export const api = {
   },
 
   async runAttendanceCleanup(retentionDays: number) {
-    const res = await fetch(`${API_URL}/settings/attendance-cleanup/run`, {
+    const res = await fetchWithRetry(`${API_URL}/settings/attendance-cleanup/run`, {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({ retentionDays })

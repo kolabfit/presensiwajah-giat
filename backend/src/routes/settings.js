@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
 /**
  * PUT /api/settings
  * Update satu atau lebih settings
- * Body: { "barcode_content": "KOPERASI GIAT", "late_threshold_minutes": "6" }
+ * Body: { "barcode_content": "KOPERASI GIAT", "late_threshold_minutes": "5" }
  */
 router.put('/', async (req, res) => {
   try {

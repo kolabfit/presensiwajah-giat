@@ -1,20 +1,36 @@
 import React, { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { LogIn, User, ShieldCheck, LogOut, Menu, X, ChevronRight, BarChart3, History, Settings, Download, Eye, EyeOff, Camera, CheckCircle2, AlertCircle, Plus, Upload, Search, Filter, ArrowLeft, MoreHorizontal, Edit2, Trash2, MapPin, Clock as ClockIcon, Database, QrCode, Image as ImageIcon } from 'lucide-react';
+import { LogIn, User, ShieldCheck, LogOut, Menu, X, ChevronRight, ChevronLeft, BarChart3, History, Settings, Download, Eye, EyeOff, Camera, CheckCircle2, AlertCircle, Plus, Search, Filter, ArrowLeft, MoreHorizontal, Edit2, Trash2, MapPin, Clock as ClockIcon, Database, Image as ImageIcon, UserPlus, RefreshCw } from 'lucide-react';
 import Clock from './components/Clock';
-import { Shift, AttendanceData, Employee, AppSettings, AttendancePhoto } from './types';
+import { Shift, AttendanceData, Employee, AppSettings, AttendancePhoto, Location } from './types';
 import { api } from './services/api';
+import { LocationFormModal, EmployeeLocationModal } from './components/LocationManager';
 import { format, isAfter, addMinutes, startOfDay, subDays, isWithinInterval } from 'date-fns';
-import QrScanner from 'qr-scanner';
-import QRCodeStyling from 'qr-code-styling';
 import * as XLSX from 'xlsx';
 
 // No hardcoded constants - all data comes from the database via API
 const GIAT_LOGO_URL = 'https://i.ibb.co.com/YBMQyzfN/logo-giat-remove-bg.png';
+const APP_VIEW_STORAGE_KEY = 'presensi:last-view';
+const ADMIN_TAB_STORAGE_KEY = 'presensi:last-admin-tab';
 
 // === TOAST & CONFIRM SYSTEM ===
 type ToastType = 'success' | 'error' | 'info';
 interface ToastItem { id: number; message: string; type: ToastType; }
+type AppView = 'employee' | 'face-register' | 'admin-login' | 'admin-dashboard';
+type AdminTab = 'dashboard' | 'history' | 'employees' | 'master-data' | 'attendance-photos' | 'settings';
+type DetectedFace = { boundingBox: DOMRectReadOnly };
+type WakeLockSentinel = {
+  release: () => Promise<void>;
+  addEventListener?: (type: 'release', listener: () => void) => void;
+};
+
+declare global {
+  interface Window {
+    FaceDetector?: new (options?: { fastMode?: boolean; maxDetectedFaces?: number }) => {
+      detect: (source: CanvasImageSource) => Promise<DetectedFace[]>;
+    };
+  }
+}
 
 const ToastContext = createContext<{
   showToast: (message: string, type?: ToastType) => void;
@@ -29,15 +45,6 @@ function fileToDataUrl(file: File) {
     reader.onload = () => resolve(String(reader.result || ''));
     reader.onerror = reject;
     reader.readAsDataURL(file);
-  });
-}
-
-function blobToDataUrl(blob: Blob) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
   });
 }
 
@@ -63,59 +70,6 @@ async function imageFileToCompressedDataUrl(file: File, maxSize = 900, quality =
   return canvas.toDataURL('image/jpeg', quality);
 }
 
-function createStyledQr(qrCode: string) {
-  return new QRCodeStyling({
-    width: 320,
-    height: 320,
-    type: 'canvas',
-    data: qrCode,
-    image: GIAT_LOGO_URL,
-    margin: 10,
-    qrOptions: {
-      errorCorrectionLevel: 'H'
-    },
-    dotsOptions: {
-      type: 'rounded',
-      color: '#111827'
-    },
-    cornersSquareOptions: {
-      type: 'extra-rounded',
-      color: '#B21B1B'
-    },
-    cornersDotOptions: {
-      type: 'dot',
-      color: '#003366'
-    },
-    backgroundOptions: {
-      color: '#FFFFFF'
-    },
-    imageOptions: {
-      margin: 5,
-      imageSize: 0.28,
-      crossOrigin: 'anonymous',
-      hideBackgroundDots: true
-    }
-  });
-}
-
-async function createStyledQrDataUrl(qrCode: string) {
-  const qr = createStyledQr(qrCode);
-  const raw = await qr.getRawData('png');
-  if (!raw || !(raw instanceof Blob)) {
-    throw new Error('Gagal membuat gambar QR');
-  }
-  return await blobToDataUrl(raw);
-}
-
-function sanitizeFileName(value: string) {
-  return value
-    .trim()
-    .replace(/[^a-z0-9-_]+/gi, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .toLowerCase() || 'pegawai';
-}
-
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
@@ -125,161 +79,83 @@ function loadImage(src: string) {
   });
 }
 
-function drawCenteredWrappedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number, maxLines = 2) {
-  const words = text.split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let line = '';
-
-  words.forEach((word) => {
-    const testLine = line ? `${line} ${word}` : word;
-    if (ctx.measureText(testLine).width > maxWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = testLine;
-    }
-  });
-  if (line) lines.push(line);
-
-  const visibleLines = lines.slice(0, maxLines);
-  if (lines.length > maxLines) {
-    const last = visibleLines[maxLines - 1];
-    let shortened = last;
-    while (ctx.measureText(`${shortened}...`).width > maxWidth && shortened.length > 1) {
-      shortened = shortened.slice(0, -1);
-    }
-    visibleLines[maxLines - 1] = `${shortened}...`;
+async function requestScreenWakeLock(wakeLockRef: { current: WakeLockSentinel | null }) {
+  if (!navigator.wakeLock || wakeLockRef.current) return;
+  try {
+    wakeLockRef.current = await navigator.wakeLock.request('screen');
+    wakeLockRef.current.addEventListener?.('release', () => {
+      wakeLockRef.current = null;
+    });
+  } catch (_error) {
+    wakeLockRef.current = null;
   }
-
-  visibleLines.forEach((textLine, index) => {
-    ctx.fillText(textLine, x, y + (index * lineHeight));
-  });
 }
 
-function drawCenteredQrDescription(ctx: CanvasRenderingContext2D, employeeName: string, centerX: number, y: number) {
-  const prefix = 'QR ini khusus untuk presensi pegawai';
-  const suffix = '.';
-
-  ctx.textAlign = 'center';
-  ctx.font = '600 24px Arial, sans-serif';
-  const prefixWidth = ctx.measureText(prefix).width;
-  ctx.font = '800 24px Arial, sans-serif';
-  const nameWidth = ctx.measureText(employeeName).width;
-  ctx.font = '600 24px Arial, sans-serif';
-  const suffixWidth = ctx.measureText(suffix).width;
-  const totalWidth = prefixWidth + 8 + nameWidth + suffixWidth;
-  let x = centerX - (totalWidth / 2);
-
-  ctx.fillStyle = '#64748B';
-  ctx.font = '600 24px Arial, sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText(prefix, x, y);
-  x += prefixWidth + 8;
-
-  ctx.fillStyle = '#111827';
-  ctx.font = '800 24px Arial, sans-serif';
-  ctx.fillText(employeeName, x, y);
-  x += nameWidth;
-
-  ctx.fillStyle = '#64748B';
-  ctx.font = '600 24px Arial, sans-serif';
-  ctx.fillText(suffix, x, y);
-}
-
-async function createEmployeeQrDownloadDataUrl(employee: Employee) {
-  if (!employee.qr_code) throw new Error('QR pegawai belum tersedia');
-
-  const employeeName = String(employee.name || 'Nama Pegawai').trim() || 'Nama Pegawai';
-  const qrDataUrl = await createStyledQrDataUrl(employee.qr_code);
-  const qrImage = await loadImage(qrDataUrl);
-  const canvas = document.createElement('canvas');
-  canvas.width = 900;
-  canvas.height = 1200;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Gagal membuat file QR');
-
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  ctx.fillStyle = '#B21B1B';
-  ctx.fillRect(0, 0, canvas.width, 18);
-
-  ctx.fillStyle = '#111827';
-  ctx.font = '700 44px Arial, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('QR PRESENSI PEGAWAI', canvas.width / 2, 95);
-
-  ctx.fillStyle = '#64748B';
-  ctx.font = '600 22px Arial, sans-serif';
-  ctx.fillText('Koperasi GIAT', canvas.width / 2, 135);
-
-  ctx.fillStyle = '#FFFFFF';
-  ctx.strokeStyle = '#E2E8F0';
-  ctx.lineWidth = 2;
-  ctx.roundRect(150, 250, 600, 600, 32);
-  ctx.fill();
-  ctx.stroke();
-  ctx.drawImage(qrImage, 190, 290, 520, 520);
-
-  ctx.fillStyle = '#64748B';
-  ctx.font = '600 24px Arial, sans-serif';
-  ctx.textAlign = 'center';
-  drawCenteredQrDescription(ctx, employeeName, canvas.width / 2, 970);
-
-  return canvas.toDataURL('image/png', 0.95);
-}
-
-function downloadDataUrl(dataUrl: string, fileName: string) {
-  const link = document.createElement('a');
-  link.href = dataUrl;
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
-
-function QrWithLogo({ qrCode, employeeName, sizeClass = 'w-14 h-14', onClick }: { qrCode?: string; employeeName: string; sizeClass?: string; onClick?: () => void }) {
-  const qrRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!qrCode || !qrRef.current) return;
-
-    qrRef.current.innerHTML = '';
-    const qr = createStyledQr(qrCode);
-
-    qr.append(qrRef.current);
-  }, [qrCode]);
-
-  if (!qrCode) return <span className="text-slate-300">-</span>;
-
-  return (
-    <div
-      onClick={onClick}
-      className={`rounded-lg border border-slate-200 bg-white p-1 overflow-hidden flex items-center justify-center ${sizeClass} ${onClick ? 'cursor-zoom-in hover:ring-2 hover:ring-[#B21B1B]/30' : ''}`}
-      title={`QR ${employeeName}`}
-      aria-label={`QR ${employeeName}`}
-    >
-      <div ref={qrRef} className="w-full h-full [&_canvas]:!w-full [&_canvas]:!h-full" />
-    </div>
-  );
+async function releaseScreenWakeLock(wakeLockRef: { current: WakeLockSentinel | null }) {
+  if (!wakeLockRef.current) return;
+  try {
+    await wakeLockRef.current.release();
+  } catch (_error) {
+    // Wake Lock may already be released by the browser.
+  } finally {
+    wakeLockRef.current = null;
+  }
 }
 
 function EvidencePhoto({ src, alt, className, onClick }: { src?: string; alt: string; className: string; onClick?: () => void }) {
   const [failed, setFailed] = useState(false);
   const [isLoading, setIsLoading] = useState(Boolean(src));
+  const [retryCount, setRetryCount] = useState(0);
+  const showReloadLabel = className.includes('max-') || className.includes('w-full') || className.includes('h-full');
 
   useEffect(() => {
     setFailed(false);
     setIsLoading(Boolean(src));
+    setRetryCount(0);
   }, [src]);
 
   if (!src || failed) {
+    const canReload = Boolean(src);
     return (
       <div className={`${className} bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-300`}>
-        <ImageIcon size={16} />
+        {canReload ? (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setFailed(false);
+              setIsLoading(true);
+              setRetryCount(count => count + 1);
+            }}
+            className="w-full h-full flex flex-col items-center justify-center gap-1 text-slate-400 hover:text-[#B21B1B] hover:bg-red-50 transition-colors"
+            title="Muat ulang gambar"
+            aria-label="Muat ulang gambar"
+          >
+            <RefreshCw size={16} />
+            {showReloadLabel && <span className="text-xs font-bold">Muat ulang</span>}
+          </button>
+        ) : (
+          <ImageIcon size={16} />
+        )}
       </div>
     );
   }
+
+  const retrySrc = retryCount > 0 && src
+    ? `${src}${src.includes('?') ? '&' : '?'}retry=${retryCount}`
+    : src;
+
+  const handleImageError = () => {
+    if (retryCount < 2) {
+      window.setTimeout(() => {
+        setIsLoading(true);
+        setRetryCount(count => count + 1);
+      }, 450 * (retryCount + 1));
+      return;
+    }
+    setIsLoading(false);
+    setFailed(true);
+  };
 
   return (
     <div className={`relative overflow-hidden bg-slate-100 ${className} ${onClick ? 'cursor-zoom-in' : ''}`} onClick={onClick}>
@@ -290,14 +166,145 @@ function EvidencePhoto({ src, alt, className, onClick }: { src?: string; alt: st
         </div>
       )}
       <img
-        src={src}
+        src={retrySrc}
         alt={alt}
         onLoad={() => setIsLoading(false)}
-        onError={() => { setIsLoading(false); setFailed(true); }}
+        onError={handleImageError}
         className={`w-full h-full ${className.includes('object-contain') ? 'object-contain' : 'object-cover'} ${onClick ? 'hover:opacity-90 transition-opacity' : ''} ${isLoading ? 'opacity-0' : 'opacity-100'}`}
       />
     </div>
   );
+}
+
+function ProfilePhoto({ src, alt, className, iconSize = 18 }: { src?: string | null; alt: string; className: string; iconSize?: number }) {
+  const [failed, setFailed] = useState(false);
+  const [isLoading, setIsLoading] = useState(Boolean(src));
+  const [retryCount, setRetryCount] = useState(0);
+  const showReloadLabel = className.includes('w-16') || className.includes('w-20') || className.includes('w-24');
+
+  useEffect(() => {
+    setFailed(false);
+    setIsLoading(Boolean(src));
+    setRetryCount(0);
+  }, [src]);
+
+  if (!src || failed) {
+    return (
+      <div className={`${className} bg-slate-100 flex items-center justify-center text-slate-400`}>
+        {src ? (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setFailed(false);
+              setIsLoading(true);
+              setRetryCount(count => count + 1);
+            }}
+            className="w-full h-full flex flex-col items-center justify-center gap-1 text-slate-400 hover:text-[#B21B1B] hover:bg-red-50 transition-colors"
+            title="Muat ulang foto"
+            aria-label="Muat ulang foto"
+          >
+            <RefreshCw size={Math.max(14, Math.min(iconSize, 22))} />
+            {showReloadLabel && <span className="text-[10px] font-bold">Muat ulang</span>}
+          </button>
+        ) : (
+          <User size={iconSize} />
+        )}
+      </div>
+    );
+  }
+
+  const retrySrc = retryCount > 0 && src
+    ? `${src}${src.includes('?') ? '&' : '?'}retry=${retryCount}`
+    : src;
+
+  const handleProfileImageError = () => {
+    if (retryCount < 2) {
+      window.setTimeout(() => {
+        setIsLoading(true);
+        setRetryCount(count => count + 1);
+      }, 450 * (retryCount + 1));
+      return;
+    }
+    setIsLoading(false);
+    setFailed(true);
+  };
+
+  return (
+    <div className={`relative overflow-hidden bg-slate-100 ${className}`}>
+      {isLoading && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-100">
+          <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-slate-100 via-slate-200 to-slate-100" />
+          <div className="relative w-4 h-4 border-2 border-slate-300 border-t-[#B21B1B] rounded-full animate-spin" />
+        </div>
+      )}
+      <img
+        src={retrySrc}
+        alt={alt}
+        onLoad={() => setIsLoading(false)}
+        onError={handleProfileImageError}
+        className={`w-full h-full object-cover transition-opacity duration-200 ${isLoading ? 'opacity-0' : 'opacity-100'}`}
+      />
+    </div>
+  );
+}
+
+function readStoredAppView(): AppView {
+  try {
+    const hashView = readHashAppView();
+    if (hashView) return hashView;
+
+    const stored = localStorage.getItem(APP_VIEW_STORAGE_KEY);
+    if (stored === 'employee' || stored === 'face-register' || stored === 'admin-login' || stored === 'admin-dashboard') {
+      return stored;
+    }
+  } catch (_error) {}
+  return 'employee';
+}
+
+function readStoredAdminTab(): AdminTab {
+  try {
+    const hashTab = readHashAdminTab();
+    if (hashTab) return hashTab;
+
+    const stored = localStorage.getItem(ADMIN_TAB_STORAGE_KEY);
+    if (stored === 'dashboard' || stored === 'history' || stored === 'employees' || stored === 'master-data' || stored === 'attendance-photos' || stored === 'settings') {
+      return stored;
+    }
+  } catch (_error) {}
+  return 'dashboard';
+}
+
+function readHashAppView(): AppView | null {
+  const hash = window.location.hash.replace(/^#\/?/, '');
+  if (hash.startsWith('admin/')) return 'admin-dashboard';
+  if (hash === 'admin-login') return 'admin-login';
+  if (hash === 'face-register') return 'face-register';
+  if (hash === 'employee' || hash === '') return null;
+  return null;
+}
+
+function readHashAdminTab(): AdminTab | null {
+  const hash = window.location.hash.replace(/^#\/?/, '');
+  const tab = hash.startsWith('admin/') ? hash.replace('admin/', '') : '';
+  if (tab === 'dashboard' || tab === 'history' || tab === 'employees' || tab === 'master-data' || tab === 'attendance-photos' || tab === 'settings') {
+    return tab;
+  }
+  return null;
+}
+
+function updateAppHash(view: AppView, adminTab?: AdminTab) {
+  const nextHash = view === 'employee'
+    ? '#/employee'
+    : view === 'face-register'
+      ? '#/face-register'
+      : view === 'admin-login'
+        ? '#/admin-login'
+        : `#/admin/${adminTab || readStoredAdminTab()}`;
+
+  if (window.location.hash !== nextHash) {
+    window.history.replaceState(null, '', nextHash);
+  }
 }
 
 function parseShiftTimeToToday(timeValue: string, baseDate: Date) {
@@ -409,14 +416,24 @@ function ToastProvider({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const [view, setView] = useState<'employee' | 'admin-login' | 'admin-dashboard'>('employee');
+  const [view, setView] = useState<AppView>(() => readStoredAppView());
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(APP_VIEW_STORAGE_KEY, view);
+    } catch (_error) {}
+    updateAppHash(view);
+  }, [view]);
 
   return (
     <ToastProvider>
     <div className="min-h-screen bg-[#F8F9FA] font-sans text-slate-900">
       <AnimatePresence mode="wait">
         {view === 'employee' && (
-          <EmployeePage onAdminClick={() => setView('admin-login')} />
+          <EmployeePage onAdminClick={() => setView('admin-login')} onRegisterFaceClick={() => setView('face-register')} />
+        )}
+        {view === 'face-register' && (
+          <FaceRegistrationPage onBack={() => setView('employee')} />
         )}
         {view === 'admin-login' && (
           <AdminLogin onLoginSuccess={() => setView('admin-dashboard')} onBack={() => setView('employee')} />
@@ -430,34 +447,39 @@ export default function App() {
   );
 }
 
-function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
+function EmployeePage({ onAdminClick, onRegisterFaceClick }: { onAdminClick: () => void; onRegisterFaceClick: () => void }) {
+  const { showToast } = useToast();
   const [location, setLocation] = useState('');
   const [shift, setShift] = useState<Shift | ''>('');
   const [note, setNote] = useState('');
   const [isLate, setIsLate] = useState(false);
-  const [isScanning, setIsScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [wrongQrDetected, setWrongQrDetected] = useState(false);
-  const scannerRef = useRef<QrScanner | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [isRecognizingFace, setIsRecognizingFace] = useState(false);
+  const [recognizedFace, setRecognizedFace] = useState<{ name: string; photoUrl?: string; distance?: number; photoDataUrl: string } | null>(null);
   const selfieVideoRef = useRef<HTMLVideoElement | null>(null);
   const selfieStreamRef = useRef<MediaStream | null>(null);
-  const wrongQrTimerRef = useRef<number | null>(null);
+  const selfieWakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const autoSelfieTimerRef = useRef<number | null>(null);
+  const faceDetectionIntervalRef = useRef<number | null>(null);
+  const faceStableCountRef = useRef(0);
+  const unregisteredToastAtRef = useRef(0);
+  const faceDetectorRef = useRef<{ detect: (source: CanvasImageSource) => Promise<DetectedFace[]> } | null>(null);
   const [hasCheckedIn, setHasCheckedIn] = useState(false);
   const [hasCheckedOut, setHasCheckedOut] = useState(false);
   const [attendanceData, setAttendanceData] = useState<AttendanceData[]>([]);
   const [loading, setLoading] = useState(false);
   const [presensiType, setPresensiType] = useState<'masuk' | 'pulang'>('masuk');
-  const [scannedEmployee, setScannedEmployee] = useState<Employee | null>(null);
   const [isSelfieOpen, setIsSelfieOpen] = useState(false);
   const [isSelfieReady, setIsSelfieReady] = useState(false);
+  const [isFaceDetected, setIsFaceDetected] = useState(false);
+  const [faceDetectionSupported, setFaceDetectionSupported] = useState(true);
 
   // Data dari database (bukan hardcode)
-  const name = scannedEmployee?.name || '';
+  const name = '';
   const [locations, setLocations] = useState<string[]>([]);
   const [shifts, setShifts] = useState<Record<string, { start_time: string; end_time: string; is_overtime: boolean }>>({});
-  const [settings, setSettings] = useState<AppSettings>({ barcode_content: '', late_threshold_minutes: '6' });
+  const [settings, setSettings] = useState<AppSettings>({ barcode_content: '', late_threshold_minutes: '5' });
 
   const parseDateStr = (dateVal: any): string => {
     if (!dateVal) return '';
@@ -514,8 +536,6 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
     if (!name) {
       setHasCheckedIn(false);
       setHasCheckedOut(false);
-      setLocation('');
-      setShift('');
       return;
     }
 
@@ -548,17 +568,67 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
   }, [name, attendanceData, loading]);
 
   const stopSelfieCamera = () => {
+    void releaseScreenWakeLock(selfieWakeLockRef);
+    if (autoSelfieTimerRef.current) {
+      window.clearTimeout(autoSelfieTimerRef.current);
+      autoSelfieTimerRef.current = null;
+    }
+    if (faceDetectionIntervalRef.current) {
+      window.clearInterval(faceDetectionIntervalRef.current);
+      faceDetectionIntervalRef.current = null;
+    }
+    faceStableCountRef.current = 0;
     selfieStreamRef.current?.getTracks().forEach(track => track.stop());
     selfieStreamRef.current = null;
     if (selfieVideoRef.current) selfieVideoRef.current.srcObject = null;
     setIsSelfieOpen(false);
     setIsSelfieReady(false);
+    setIsFaceDetected(false);
+  };
+
+  const closeRecognitionConfirmation = () => {
+    setRecognizedFace(null);
+    setIsRecognizingFace(false);
+    setIsFaceDetected(false);
+    faceStableCountRef.current = 0;
+  };
+
+  const retryRecognition = () => {
+    closeRecognitionConfirmation();
+    setTimeout(() => startSelfieCamera(), 120);
+  };
+
+  const validateCheckInRequirements = (source: 'camera' | 'scan' | 'save' = 'camera') => {
+    if (presensiType !== 'masuk') return true;
+
+    if (!location || !shift) {
+      const message = source === 'save'
+        ? 'Lokasi kerja dan shift kosong. Silakan pilih ulang lokasi kerja dan shift sebelum menyimpan presensi.'
+        : 'Lokasi kerja dan shift belum terisi. Pilih lokasi kerja dan shift terlebih dahulu sebelum membuka kamera.';
+      setScanResult({ success: false, message });
+      return false;
+    }
+
+    if (isLate && !note.trim()) {
+      setScanResult({
+        success: false,
+        message: 'Catatan keterlambatan wajib diisi sebelum membuka kamera.'
+      });
+      return false;
+    }
+
+    return true;
   };
 
   const startSelfieCamera = async () => {
+    if (!validateCheckInRequirements('camera')) return;
+
     setIsSelfieOpen(true);
     setIsSelfieReady(false);
+    setIsFaceDetected(false);
+    setFaceDetectionSupported(Boolean(window.FaceDetector));
     try {
+      void requestScreenWakeLock(selfieWakeLockRef);
       await new Promise(resolve => setTimeout(resolve, 100));
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Perangkat ini belum bisa membuka kamera. Gunakan perangkat yang memiliki kamera, lalu coba lagi.');
@@ -580,6 +650,27 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
           ? e.message
           : 'Kamera belum bisa dibuka. Izinkan akses kamera agar wajah bisa difoto sebagai bukti presensi.'
       });
+    }
+  };
+
+  const detectSelfieFace = async () => {
+    const video = selfieVideoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight || !window.FaceDetector) return false;
+
+    try {
+      if (!faceDetectorRef.current) {
+        faceDetectorRef.current = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+      }
+      const faces = await faceDetectorRef.current.detect(video);
+      return faces.length > 0;
+    } catch (_error) {
+      if (faceDetectionIntervalRef.current) {
+        window.clearInterval(faceDetectionIntervalRef.current);
+        faceDetectionIntervalRef.current = null;
+      }
+      setFaceDetectionSupported(false);
+      setIsFaceDetected(false);
+      return false;
     }
   };
 
@@ -649,7 +740,7 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       const now = new Date();
       const shiftStartTime = parseShiftTimeToToday(shiftData.start_time, now);
       if (!shiftStartTime) { setIsLate(false); return; }
-      const lateThreshold = addMinutes(shiftStartTime, parseInt(settings.late_threshold_minutes) || 6);
+      const lateThreshold = addMinutes(shiftStartTime, parseInt(settings.late_threshold_minutes) || 5);
       
       if (isAfter(now, lateThreshold)) {
         setIsLate(true);
@@ -663,145 +754,83 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
     }
   }, [shift, hasCheckedIn, presensiType, shifts, settings]);
 
-  const startScanner = async () => {
+  const startFaceAttendance = async () => {
+    if (!validateCheckInRequirements('scan')) return;
+
     const locationAllowed = await ensureLocationBeforeScan();
     if (!locationAllowed) return;
-
-    setIsScanning(true);
-    setTimeout(async () => {
-      if (!videoRef.current) {
-        setIsScanning(false);
-        setScanResult({ success: false, message: 'Kamera belum siap. Silakan coba buka scan lagi.' });
-        return;
-      }
-      try {
-        const qrScanner = new QrScanner(
-          videoRef.current,
-          (result) => {
-            qrScanner.stop();
-            qrScanner.destroy();
-            scannerRef.current = null;
-            setWrongQrDetected(false);
-            setIsScanning(false);
-            handleScan(result.data);
-          },
-          {
-            preferredCamera: 'environment',
-            highlightScanRegion: false,
-            highlightCodeOutline: false,
-            maxScansPerSecond: 30,
-            calculateScanRegion: (video) => ({
-              x: 0,
-              y: 0,
-              width: video.videoWidth,
-              height: video.videoHeight,
-            }),
-          }
-        );
-        scannerRef.current = qrScanner;
-        await qrScanner.start();
-      } catch (err) {
-        console.error("Unable to start scanning", err);
-        scannerRef.current = null;
-        setIsScanning(false);
-        setScanResult({ success: false, message: 'Kamera belum bisa dibuka. Izinkan akses kamera agar QR pegawai bisa discan.' });
-      }
-    }, 100);
+    setScanResult(null);
+    setTimeout(() => startSelfieCamera(), 150);
   };
 
-  const stopScanner = async () => {
-    if (scannerRef.current) {
-      try {
-        scannerRef.current.stop();
-        scannerRef.current.destroy();
-      } catch (e) {
-        // ignore
-      }
-      scannerRef.current = null;
-    }
-    if (wrongQrTimerRef.current) {
-      window.clearTimeout(wrongQrTimerRef.current);
-      wrongQrTimerRef.current = null;
-    }
-    setWrongQrDetected(false);
-    setIsScanning(false);
+  const notifyUnregisteredFace = () => {
+    const now = Date.now();
+    if (now - unregisteredToastAtRef.current < 4500) return;
+    unregisteredToastAtRef.current = now;
+    showToast('Wajah tidak terdaftar. Silakan daftar wajah terlebih dahulu.', 'error');
   };
 
-  const handleScan = async (content: string) => {
-    const scannedQr = content.trim();
-    if (!scannedQr) {
-      setScanResult({ success: false, message: 'QR tidak terbaca. Pastikan QR pegawai terlihat jelas di kamera, lalu scan ulang.' });
-      return;
-    }
+  const recognizeSelfieForConfirmation = async (options: { silent?: boolean } = {}) => {
+    if (isProcessing || isRecognizingFace || recognizedFace) return;
 
-    setIsProcessing(true);
-    try {
-      const result = await api.getEmployeeByQr(scannedQr);
-      setIsProcessing(false);
-      if (!result.success || !result.employee) {
-        setScanResult({ success: false, message: result.message || 'QR tidak cocok dengan data pegawai. Silakan scan QR pegawai yang benar.' });
-        return;
+    const isCheckIn = presensiType === 'masuk';
+
+    if (isCheckIn && (!location || !shift)) {
+      if (!options.silent) {
+        setScanResult({
+          success: false,
+          message: 'Lokasi kerja dan shift belum terisi. Pilih lokasi kerja dan shift, lalu lakukan presensi wajah.'
+        });
       }
-      const todayStr = format(new Date(), 'yyyy-MM-dd');
-      const todayRecords = attendanceData.filter(d => d.Name === result.employee?.name && parseDateStr(d.Date) === todayStr);
-      const openRecord = todayRecords.find(d => d.TimeIn && !d.TimeOut);
-      const doneRecord = todayRecords.find(d => d.TimeIn && d.TimeOut);
-
-      if (presensiType === 'masuk' && (openRecord || doneRecord)) {
-        setScanResult({ success: false, message: 'Pegawai ini sudah melakukan presensi masuk hari ini.' });
-        return;
-      }
-      if (presensiType === 'pulang' && !openRecord) {
-        setScanResult({ success: false, message: doneRecord ? 'Pegawai ini sudah presensi pulang hari ini.' : 'Data presensi masuk hari ini belum ditemukan.' });
-        return;
-      }
-      if (presensiType === 'pulang' && openRecord) {
-        setLocation(openRecord.Location || location);
-        setShift((openRecord.Shift as Shift) || shift);
-      }
-      setScannedEmployee(result.employee);
-      setScanResult(null);
-      setTimeout(() => startSelfieCamera(), 250);
-    } catch (e) {
-      setIsProcessing(false);
-      setScanResult({ success: false, message: 'QR belum bisa diperiksa. Silakan coba scan ulang beberapa saat lagi.' });
-    }
-  };
-
-  const processAttendance = async () => {
-    if (isProcessing) return;
-    if (!scannedEmployee) {
-      setScanResult({ success: false, message: 'Data pegawai belum terbaca. Silakan scan QR pegawai terlebih dahulu.' });
-      return;
-    }
-
-    const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const openRecord = attendanceData.find(d =>
-      d.Name === scannedEmployee.name &&
-      parseDateStr(d.Date) === todayStr &&
-      d.TimeIn &&
-      !d.TimeOut
-    );
-    const attendanceLocation = presensiType === 'pulang' ? (location || openRecord?.Location || '') : location;
-    const attendanceShift = presensiType === 'pulang' ? ((shift || openRecord?.Shift || '') as Shift) : (shift as Shift);
-
-    if (!attendanceLocation || !attendanceShift) {
-      setScanResult({
-        success: false,
-        message: presensiType === 'pulang'
-          ? 'Data presensi masuk hari ini belum lengkap. Silakan hubungi admin untuk memeriksa lokasi kerja dan shift presensi masuk.'
-          : 'Lokasi kerja dan shift belum terisi. Pilih lokasi kerja dan shift, lalu scan ulang QR pegawai.'
-      });
       return;
     }
     const hasFrame = await waitForSelfieFrame();
     if (!hasFrame) {
-      setScanResult({ success: false, message: 'Kamera selfie belum siap. Tunggu wajah terlihat jelas lalu coba lagi.' });
+      if (!options.silent) setScanResult({ success: false, message: 'Kamera wajah belum siap. Tunggu wajah terlihat jelas lalu coba lagi.' });
       return;
     }
     const photoDataUrl = captureSelfieDataUrl();
     if (!photoDataUrl) {
-      setScanResult({ success: false, message: 'Foto selfie belum berhasil diambil. Pastikan wajah terlihat jelas lalu coba lagi.' });
+      if (!options.silent) setScanResult({ success: false, message: 'Foto wajah belum berhasil diambil. Pastikan wajah terlihat jelas lalu coba lagi.' });
+      return;
+    }
+
+    setIsRecognizingFace(true);
+    try {
+      const result = await api.recognizeAttendanceFace(photoDataUrl);
+      if (result.success && result.employee?.name) {
+        setRecognizedFace({
+          name: result.employee.name,
+          photoUrl: result.employee.photo_url,
+          distance: result.face?.distance,
+          photoDataUrl
+        });
+        stopSelfieCamera();
+      } else {
+        if (options.silent) {
+          notifyUnregisteredFace();
+        } else {
+          setScanResult({ success: false, message: result.message || 'Wajah belum berhasil dikenali.' });
+        }
+      }
+    } catch (_error) {
+      if (options.silent) {
+        notifyUnregisteredFace();
+      } else {
+        setScanResult({ success: false, message: 'Wajah belum berhasil dikenali. Silakan coba lagi.' });
+      }
+    } finally {
+      setIsRecognizingFace(false);
+    }
+  };
+
+  const processAttendance = async () => {
+    if (isProcessing || !recognizedFace) return;
+
+    const isCheckIn = presensiType === 'masuk';
+
+    if (isCheckIn && !validateCheckInRequirements('save')) {
+      setRecognizedFace(null);
       return;
     }
 
@@ -817,50 +846,54 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       });
       return;
     }
-    stopSelfieCamera();
 
     const now = new Date();
-    const isCheckIn = presensiType === 'masuk';
     const data: Partial<AttendanceData> = isCheckIn
       ? {
           Date: format(now, 'yyyy-MM-dd'),
-          Name: name,
-          Location: attendanceLocation,
-          Shift: attendanceShift,
+          Name: '',
+          Location: location,
+          Shift: shift as Shift,
           TimeIn: format(now, 'HH.mm'),
           Status: isLate ? 'Terlambat' : 'Tepat Waktu',
           Note: note,
-          PhotoDataUrl: photoDataUrl,
+          PhotoDataUrl: recognizedFace.photoDataUrl,
           Latitude: position.coords.latitude,
-          Longitude: position.coords.longitude
+          Longitude: position.coords.longitude,
+          Accuracy: position.coords.accuracy
         }
       : {
           Date: format(now, 'yyyy-MM-dd'),
-          Name: name,
-          Location: attendanceLocation,
-          Shift: attendanceShift,
+          Name: '',
           TimeOut: format(now, 'HH.mm'),
-          PhotoDataUrl: photoDataUrl,
+          PhotoDataUrl: recognizedFace.photoDataUrl,
           Latitude: position.coords.latitude,
-          Longitude: position.coords.longitude
+          Longitude: position.coords.longitude,
+          Accuracy: position.coords.accuracy
         };
 
     try {
       const result = await api.saveAttendance(data);
       setIsProcessing(false);
+      setRecognizedFace(null);
       if (result.success) {
-        const successMsg = isCheckIn 
-          ? (isLate ? 'Presensi masuk berhasil (Terlambat)' : 'Presensi masuk berhasil') 
-          : 'Presensi pulang berhasil';
+        const recognizedName = result.employee?.name ? ` atas nama ${result.employee.name}` : '';
+        const successMsg = isCheckIn
+          ? (isLate ? `Presensi masuk berhasil${recognizedName} (Terlambat)` : `Presensi masuk berhasil${recognizedName}`)
+          : `Presensi pulang berhasil${recognizedName}`;
         setScanResult({ success: true, message: successMsg });
         if (isCheckIn) setHasCheckedIn(true);
         else setHasCheckedOut(true);
         fetchData();
       } else {
-        setScanResult({ success: false, message: result.message || 'Gagal menyimpan data' });
+        const message = result.message || 'Gagal menyimpan data';
+        showToast(message, 'error');
+        setScanResult({ success: false, message });
       }
     } catch (e) {
       setIsProcessing(false);
+      setRecognizedFace(null);
+      showToast('Gagal menghubungi server. Periksa koneksi internet.', 'error');
       setScanResult({ success: false, message: 'Gagal menghubungi server. Periksa koneksi internet.' });
     }
   };
@@ -870,10 +903,90 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
     parseDateStr(d.Date) === format(new Date(), 'yyyy-MM-dd')
   ) : null;
   const needsWorkSelection = presensiType === 'masuk';
-  const scanDisabled = (needsWorkSelection && (!location || !shift || (isLate && !note))) ||
-    (presensiType === 'masuk' && hasCheckedIn) ||
-    (presensiType === 'pulang' && hasCheckedOut);
-  const selfieActionDisabled = !isSelfieReady || isProcessing || (needsWorkSelection && (!location || !shift));
+  const scanDisabled = (needsWorkSelection && (!shift || (isLate && !note.trim()))) ||
+    (presensiType === 'masuk' && hasCheckedIn);
+  const selfieActionDisabled = !isSelfieReady || isProcessing || isRecognizingFace || Boolean(recognizedFace) || (needsWorkSelection && (!shift));
+  const scanHelperText = presensiType === 'pulang'
+    ? 'Kamera akan mengenali wajah pegawai dan backend akan memvalidasi geofence otomatis.'
+    : (!shift
+        ? 'Pilih shift terlebih dahulu sebelum kamera dibuka. Lokasi akan dideteksi otomatis via GPS.'
+        : isLate && !note.trim()
+          ? 'Isi catatan keterlambatan terlebih dahulu sebelum kamera dibuka.'
+          : 'Kamera akan mengenali wajah pegawai terdaftar.');
+
+  useEffect(() => {
+    if (!isSelfieOpen || presensiType !== 'masuk') return;
+    if (shift && (!isLate || note.trim())) return;
+
+    stopSelfieCamera();
+    setScanResult({
+      success: false,
+      message: !shift
+        ? 'Kamera ditutup karena shift belum terisi. Pilih shift, lalu buka kamera lagi.'
+        : 'Kamera ditutup karena catatan keterlambatan belum diisi.'
+    });
+  }, [isSelfieOpen, presensiType, shift, isLate, note]);
+
+  useEffect(() => {
+    if (!isSelfieOpen || !isSelfieReady || selfieActionDisabled) return;
+
+    if (autoSelfieTimerRef.current) {
+      window.clearTimeout(autoSelfieTimerRef.current);
+      autoSelfieTimerRef.current = null;
+    }
+    if (faceDetectionIntervalRef.current) {
+      window.clearInterval(faceDetectionIntervalRef.current);
+      faceDetectionIntervalRef.current = null;
+    }
+
+    if (!window.FaceDetector) {
+      setFaceDetectionSupported(false);
+      setIsFaceDetected(false);
+      faceDetectionIntervalRef.current = window.setInterval(() => {
+        if (!isSelfieOpen || isProcessing || isRecognizingFace || recognizedFace) return;
+        recognizeSelfieForConfirmation({ silent: true });
+      }, 1600);
+      return;
+    }
+
+    setFaceDetectionSupported(true);
+    setIsFaceDetected(false);
+    faceStableCountRef.current = 0;
+
+    faceDetectionIntervalRef.current = window.setInterval(async () => {
+      const detected = await detectSelfieFace();
+      if (!isSelfieOpen || isProcessing || isRecognizingFace || recognizedFace) return;
+
+      if (detected) {
+        faceStableCountRef.current += 1;
+        setIsFaceDetected(true);
+      } else {
+        faceStableCountRef.current = 0;
+        setIsFaceDetected(false);
+      }
+
+      if (faceStableCountRef.current >= 2) {
+        if (faceDetectionIntervalRef.current) {
+          window.clearInterval(faceDetectionIntervalRef.current);
+          faceDetectionIntervalRef.current = null;
+        }
+        autoSelfieTimerRef.current = window.setTimeout(() => {
+          recognizeSelfieForConfirmation({ silent: true });
+        }, 650);
+      }
+    }, 450);
+
+    return () => {
+      if (autoSelfieTimerRef.current) {
+        window.clearTimeout(autoSelfieTimerRef.current);
+        autoSelfieTimerRef.current = null;
+      }
+      if (faceDetectionIntervalRef.current) {
+        window.clearInterval(faceDetectionIntervalRef.current);
+        faceDetectionIntervalRef.current = null;
+      }
+    };
+  }, [isSelfieOpen, isSelfieReady, selfieActionDisabled, presensiType, location, shift, note, isLate, isRecognizingFace, recognizedFace]);
 
   return (
     <motion.div 
@@ -885,9 +998,18 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       {/* Header */}
       <div className="flex justify-between items-center py-2">
         <img src={GIAT_LOGO_URL} alt="Logo Giat" className="h-10" />
-        <button onClick={onAdminClick} className="w-10 h-10 bg-slate-200 text-slate-500 hover:bg-slate-300 rounded-full flex items-center justify-center transition-colors">
-          <User size={20} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onRegisterFaceClick}
+            className="h-10 px-3 bg-white border border-slate-200 text-[#B21B1B] hover:bg-red-50 rounded-full flex items-center justify-center gap-2 transition-colors text-xs font-extrabold"
+          >
+            <UserPlus size={16} />
+            Daftar Wajah
+          </button>
+          <button onClick={onAdminClick} className="w-10 h-10 bg-slate-200 text-slate-500 hover:bg-slate-300 rounded-full flex items-center justify-center transition-colors">
+            <User size={20} />
+          </button>
+        </div>
       </div>
 
       <Clock />
@@ -928,67 +1050,77 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
         {/* Form Fields */}
         <div className="space-y-4">
           <div>
-            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Pegawai Ter-scan</label>
+            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Verifikasi Wajah</label>
             <div className="flex items-center gap-3 p-3.5 rounded-xl border border-slate-200 bg-slate-50">
               <div className="w-12 h-12 rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center flex-shrink-0">
-                {scannedEmployee?.photo_url ? <img src={scannedEmployee.photo_url} alt={scannedEmployee.name} className="w-full h-full object-cover" /> : <User size={22} className="text-slate-400" />}
+                <User size={22} className="text-slate-400" />
               </div>
               <div className="min-w-0 flex-1">
-                <div className="font-bold text-slate-800 truncate">{scannedEmployee?.name || 'Belum scan QR pegawai'}</div>
+                <div className="font-bold text-slate-800 truncate">Presensi langsung dengan wajah</div>
                 <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 truncate">
-                  {scannedEmployee ? `${location || '-'} - ${shift || '-'}` : 'Pilih lokasi dan shift, lalu scan barcode'}
+                  Presensi masuk memilih lokasi dan shift, presensi pulang cukup verifikasi wajah
                 </div>
               </div>
-              {scannedEmployee && (
-                <button onClick={() => setScannedEmployee(null)} className="p-2 rounded-lg hover:bg-white text-slate-400">
-                  <X size={16} />
-                </button>
-              )}
             </div>
           </div>
 
-          <div className="flex flex-col sm:flex-row gap-4">
-            <div className="flex-1">
-              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-                Lokasi Kerja {presensiType === 'pulang' && <span className="text-slate-400 normal-case">(otomatis dari masuk)</span>}
-              </label>
-              <select 
-                value={location} 
-                onChange={(e) => setLocation(e.target.value)}
-                disabled={hasCheckedIn || presensiType === 'pulang'}
-                className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn || presensiType === 'pulang' ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
-              >
-                <option value="">{presensiType === 'pulang' ? 'Mengikuti presensi masuk' : 'Pilih Lokasi'}</option>
-                {locations.map(l => <option key={l} value={l}>{l}</option>)}
-              </select>
+          {presensiType === 'masuk' ? (
+            <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex-1">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+                  Lokasi Kerja
+                </label>
+                <select
+                  value={location}
+                  onChange={(e) => setLocation(e.target.value)}
+                  disabled={hasCheckedIn && presensiType === 'masuk'}
+                  className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn && presensiType === 'masuk' ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
+                >
+                  <option value="">Pilih Lokasi</option>
+                  {locations.map((loc) => (
+                    <option key={loc} value={loc}>{loc}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex-1">
+                <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+                  Waktu Shift
+                </label>
+                <select
+                  value={shift}
+                  onChange={(e) => setShift(e.target.value as Shift)}
+                  disabled={hasCheckedIn && presensiType === 'masuk'}
+                  className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn && presensiType === 'masuk' ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
+                >
+                  <option value="">Pilih Shift</option>
+                  {Object.entries(shifts).map(([s, t]) => {
+                    const times = t as { start_time: string; end_time: string };
+                    return <option key={s} value={s}>{s} ({times.start_time} - {times.end_time})</option>;
+                  })}
+                </select>
+                {shift && shifts[shift] && (
+                  <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
+                    <ClockIcon size={12} className="text-[#B21B1B]" />
+                    <span className="font-bold text-slate-700">{shifts[shift].start_time}</span>
+                    <span className="text-slate-400">-</span>
+                    <span className="font-bold text-slate-700">{shifts[shift].end_time}</span>
+                  </div>
+                )}
+              </div>
             </div>
-
-            <div className="flex-1">
-              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-                Waktu Shift {presensiType === 'pulang' && <span className="text-slate-400 normal-case">(otomatis dari masuk)</span>}
-              </label>
-              <select 
-                value={shift} 
-                onChange={(e) => setShift(e.target.value as Shift)}
-                disabled={hasCheckedIn || presensiType === 'pulang'}
-                className={`w-full p-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm appearance-none ${hasCheckedIn || presensiType === 'pulang' ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'}`}
-              >
-                <option value="">{presensiType === 'pulang' ? 'Mengikuti presensi masuk' : 'Pilih Shift'}</option>
-                {Object.entries(shifts).map(([s, t]) => {
-                  const times = t as { start_time: string; end_time: string };
-                  return <option key={s} value={s}>{s} ({times.start_time} – {times.end_time})</option>;
-                })}
-              </select>
-              {shift && shifts[shift] && (
-                <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
-                  <ClockIcon size={12} className="text-[#B21B1B]" />
-                  <span className="font-bold text-slate-700">{shifts[shift].start_time}</span>
-                  <span className="text-slate-400">–</span>
-                  <span className="font-bold text-slate-700">{shifts[shift].end_time}</span>
+          ) : (
+            <div className="rounded-xl border border-blue-100 bg-blue-50 p-3.5 flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-white border border-blue-100 text-blue-600 flex items-center justify-center flex-shrink-0">
+                <ClockIcon size={18} />
+              </div>
+              <div className="min-w-0">
+                <div className="font-bold text-blue-900 text-sm">Presensi pulang cukup scan wajah</div>
+                <div className="text-xs text-blue-700 mt-1 leading-relaxed">
+                  Lokasi kerja dan shift otomatis mengikuti data presensi masuk hari ini.
                 </div>
-              )}
+              </div>
             </div>
-          </div>
+          )}
 
           {isLate && presensiType === 'masuk' && (
             <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}>
@@ -1006,20 +1138,18 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
         <div className="pt-2">
           <button
             disabled={scanDisabled}
-            onClick={startScanner}
+            onClick={startFaceAttendance}
             className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${
               scanDisabled
                 ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
                 : 'bg-[#B21B1B] text-white hover:bg-[#901515] shadow-lg shadow-red-900/20 active:scale-95'
             }`}
           >
-            <QrCode size={20} />
-            {presensiType === 'masuk' ? 'SCAN BARCODE MASUK' : 'SCAN BARCODE PULANG'}
+            <Camera size={20} />
+            {presensiType === 'masuk' ? 'PRESENSI WAJAH MASUK' : 'PRESENSI WAJAH PULANG'}
           </button>
-          <p className="text-center text-[10px] text-slate-400 mt-4">
-            {presensiType === 'pulang'
-              ? 'Presensi pulang akan otomatis memakai lokasi kerja dan shift dari presensi masuk hari ini.'
-              : 'Silakan scan QR unik pegawai, lalu ambil foto selfie sebagai bukti presensi.'}
+          <p className={`text-center text-[10px] mt-4 ${scanDisabled ? 'text-red-400 font-bold' : 'text-slate-400'}`}>
+            {scanHelperText}
           </p>
         </div>
       </div>
@@ -1104,46 +1234,8 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
         </div>
       )}
 
-      {/* Scanner Popup */}
-      {isScanning && (
-        <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-6">
-          <div className="w-full max-w-sm bg-black rounded-2xl overflow-hidden relative aspect-square">
-            <video ref={videoRef} className="w-full h-full object-cover" />
-            {/* Overlay kotak target */}
-            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-              <div className={`w-3/4 h-3/4 relative transition-colors ${wrongQrDetected ? 'opacity-80' : ''}`}>
-                <div className={`absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 rounded-tl-lg ${wrongQrDetected ? 'border-red-500' : 'border-white'}`}></div>
-                <div className={`absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 rounded-tr-lg ${wrongQrDetected ? 'border-red-500' : 'border-white'}`}></div>
-                <div className={`absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 rounded-bl-lg ${wrongQrDetected ? 'border-red-500' : 'border-white'}`}></div>
-                <div className={`absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 rounded-br-lg ${wrongQrDetected ? 'border-red-500' : 'border-white'}`}></div>
-              </div>
-            </div>
-            {/* Banner peringatan kalau QR salah */}
-            {wrongQrDetected && (
-              <motion.div 
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="absolute top-3 left-3 right-3 bg-red-500/95 text-white px-4 py-2.5 rounded-xl shadow-lg flex items-center gap-2 text-sm font-medium"
-              >
-                <AlertCircle size={16} />
-                QR code tidak valid
-              </motion.div>
-            )}
-          </div>
-          <p className="text-white/80 text-sm font-medium mt-4 text-center">
-            {wrongQrDetected ? 'Coba scan QR Koperasi Giat yang resmi' : 'Arahkan kamera ke QR code'}
-          </p>
-          <button 
-            onClick={stopScanner}
-            className="mt-6 px-8 py-3 bg-white text-slate-900 rounded-full font-bold shadow-lg active:scale-95 transition-transform"
-          >
-            BATAL
-          </button>
-        </div>
-      )}
-
       {/* Processing Popup */}
-      {isProcessing && (
+      {isProcessing && !recognizedFace && (
         <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-6 backdrop-blur-sm">
           <motion.div 
             initial={{ scale: 0.85, opacity: 0 }}
@@ -1157,7 +1249,7 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
               </div>
               <div>
                 <h3 className="text-lg font-extrabold text-slate-800">Memproses...</h3>
-                <p className="text-sm text-slate-500 mt-2">Memeriksa QR, mengunggah foto, dan menyimpan data presensi.</p>
+                <p className="text-sm text-slate-500 mt-2">Mengenali wajah, mengunggah foto ke CDN, dan menyimpan data presensi.</p>
               </div>
             </div>
           </motion.div>
@@ -1165,58 +1257,145 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
       )}
 
       {/* Selfie Popup */}
-      {isSelfieOpen && scannedEmployee && (
-        <div className="fixed inset-0 bg-black/90 z-[55] flex flex-col items-center justify-center p-6">
-          <div className="w-full max-w-sm bg-white rounded-3xl overflow-hidden shadow-2xl">
-            <div className="p-4 border-b border-slate-100">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-xl overflow-hidden bg-slate-100 flex items-center justify-center">
-                  {scannedEmployee.photo_url ? <img src={scannedEmployee.photo_url} alt={scannedEmployee.name} className="w-full h-full object-cover" /> : <User size={22} className="text-slate-400" />}
+      {isSelfieOpen && (
+        <div className="fixed inset-0 bg-slate-950/95 z-[55] flex flex-col items-center justify-center overflow-y-auto p-3 sm:p-6 [padding-top:max(0.75rem,env(safe-area-inset-top))] [padding-bottom:max(0.75rem,env(safe-area-inset-bottom))]">
+          <div className="w-full max-w-sm sm:max-w-md lg:max-w-xl max-h-[calc(100dvh-1.5rem)] sm:max-h-[calc(100dvh-3rem)] bg-white rounded-[28px] overflow-hidden shadow-2xl border border-white/10 flex flex-col">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3 flex-shrink-0">
+              <div className="min-w-0">
+                <div className="font-extrabold text-slate-800 truncate">Verifikasi wajah pegawai</div>
+                <div className="text-xs text-slate-500 truncate">
+                  {presensiType === 'masuk'
+                    ? `${location || 'Lokasi belum terisi'} - ${shift || 'Shift belum terisi'}`
+                    : 'Lokasi dan shift mengikuti presensi masuk'}
                 </div>
-                <div className="min-w-0">
-                  <div className="font-extrabold text-slate-800 truncate">{scannedEmployee.name}</div>
-                  <div className="text-xs text-slate-500 truncate">{location || 'Lokasi belum terisi'} - {shift || 'Shift belum terisi'}</div>
+              </div>
+              <div className={`px-2.5 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider ${
+                !isSelfieReady
+                  ? 'bg-slate-100 text-slate-500'
+                  : isFaceDetected
+                    ? 'bg-green-50 text-green-600'
+                    : 'bg-yellow-50 text-yellow-600'
+              }`}>
+                {!isSelfieReady ? 'Loading' : isFaceDetected ? 'Face Found' : 'Align Face'}
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="h-[min(58dvh,560px)] min-h-[280px] bg-black relative overflow-hidden">
+                <video
+                  ref={selfieVideoRef}
+                  playsInline
+                  muted
+                  onLoadedMetadata={() => setIsSelfieReady(true)}
+                  onCanPlay={() => setIsSelfieReady(true)}
+                  className="w-full h-full object-cover scale-x-[-1] brightness-[1.18] contrast-[1.08] saturate-[1.04]"
+                />
+                <div className="absolute inset-0 bg-gradient-to-b from-black/35 via-transparent to-black/45 pointer-events-none" />
+                <div className={`absolute inset-x-8 sm:inset-x-12 top-12 lg:top-16 bottom-16 lg:bottom-20 rounded-[999px] border shadow-[0_0_0_999px_rgba(0,0,0,0.18)] camera-guide-breathe pointer-events-none ${
+                  isFaceDetected ? 'border-green-300/90' : 'border-white/55'
+                }`} />
+                <div className="absolute left-6 top-6 w-12 h-12 border-l-4 border-t-4 border-white/85 rounded-tl-2xl pointer-events-none" />
+                <div className="absolute right-6 top-6 w-12 h-12 border-r-4 border-t-4 border-white/85 rounded-tr-2xl pointer-events-none" />
+                <div className="absolute left-6 bottom-6 w-12 h-12 border-l-4 border-b-4 border-white/85 rounded-bl-2xl pointer-events-none" />
+                <div className="absolute right-6 bottom-6 w-12 h-12 border-r-4 border-b-4 border-white/85 rounded-br-2xl pointer-events-none" />
+                <div className="absolute left-4 right-4 bottom-4 rounded-2xl bg-black/45 backdrop-blur-md border border-white/10 px-4 py-3 text-white">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-extrabold truncate">
+                        {isRecognizingFace
+                          ? 'Mengecek nama pegawai'
+                          : !isSelfieReady
+                          ? 'Menyiapkan kamera'
+                          : isFaceDetected
+                            ? 'Wajah terdeteksi'
+                            : 'Arahkan wajah ke frame'}
+                      </div>
+                      <div className="text-[10px] text-white/65 truncate">
+                        {isRecognizingFace ? 'Mohon tunggu sebentar' : 'Popup konfirmasi muncul otomatis setelah nama dikenali'}
+                      </div>
+                    </div>
+                    <div className={`w-2.5 h-2.5 rounded-full ${isFaceDetected ? 'bg-green-400 shadow-[0_0_12px_rgba(74,222,128,0.95)]' : 'bg-yellow-300 animate-pulse'}`} />
+                  </div>
+                </div>
+                {!isSelfieReady && (
+                  <div className="absolute inset-0 bg-black/55 flex items-center justify-center text-white text-sm font-bold backdrop-blur-sm">
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-10 h-10 rounded-full border-4 border-white/30 border-t-white animate-spin" />
+                      Menyiapkan kamera...
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="px-4 pt-4 pb-3">
+                <div className="rounded-2xl bg-slate-50 border border-slate-100 p-3 text-xs text-slate-600 leading-relaxed flex items-center gap-3">
+                  <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isRecognizingFace ? 'bg-blue-500 animate-pulse' : isFaceDetected ? 'bg-green-500' : 'bg-yellow-400 animate-pulse'}`} />
+                  <span>
+                    {isRecognizingFace
+                      ? 'Sedang mengidentifikasi nama pegawai...'
+                      : 'Arahkan wajah ke dalam frame. Sistem akan otomatis menampilkan konfirmasi nama.'}
+                  </span>
                 </div>
               </div>
             </div>
-            <div className="aspect-[3/4] bg-black relative">
-              <video
-                ref={selfieVideoRef}
-                playsInline
-                muted
-                onLoadedMetadata={() => setIsSelfieReady(true)}
-                onCanPlay={() => setIsSelfieReady(true)}
-                className="w-full h-full object-cover scale-x-[-1]"
-              />
-              {!isSelfieReady && (
-                <div className="absolute inset-0 bg-black/55 flex items-center justify-center text-white text-sm font-bold">
-                  Menyiapkan kamera...
-                </div>
-              )}
-            </div>
-            <div className="px-4 pt-4">
-              <div className="rounded-xl bg-blue-50 border border-blue-100 p-3 text-xs text-blue-800 leading-relaxed">
-                Selfie wajah digunakan sebagai bukti presensi dan akan disimpan bersama waktu, lokasi kerja, shift, serta koordinat absen.
-              </div>
-            </div>
-            <div className="p-4 flex gap-3">
-              <button onClick={stopSelfieCamera} className="flex-1 py-3 rounded-xl border border-slate-200 text-slate-600 font-bold">
+            <div className="p-4 bg-white border-t border-slate-100 flex-shrink-0 [padding-bottom:max(1rem,env(safe-area-inset-bottom))]">
+              <button onClick={stopSelfieCamera} className="w-full py-3 rounded-2xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50">
                 Batal
-              </button>
-              <button
-                onClick={processAttendance}
-                disabled={selfieActionDisabled}
-                className={`flex-1 py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
-                  selfieActionDisabled
-                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                    : 'bg-[#B21B1B] text-white hover:bg-[#901515]'
-                }`}
-              >
-                <Camera size={18} />
-                {needsWorkSelection && (!location || !shift) ? 'Lengkapi Data' : isSelfieReady ? (presensiType === 'masuk' ? 'Proses Masuk' : 'Proses Pulang') : 'Tunggu Kamera'}
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Recognition Confirmation Popup */}
+      {recognizedFace && (
+        <div className="fixed inset-0 bg-black/55 z-[60] flex items-center justify-center p-6 backdrop-blur-sm">
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0, y: 18 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            transition={{ type: 'spring', damping: 20, stiffness: 280 }}
+            className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl"
+          >
+            <div className="h-2 bg-[#B21B1B]" />
+            <div className="p-6 text-center space-y-5">
+              <ProfilePhoto
+                src={recognizedFace.photoUrl}
+                alt={recognizedFace.name}
+                className="w-24 h-24 mx-auto rounded-3xl border border-slate-200"
+                iconSize={38}
+              />
+              <div>
+                <div className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-2">
+                  Wajah dikenali sebagai
+                </div>
+                <h3 className="text-2xl font-black text-slate-800">{recognizedFace.name}</h3>
+              </div>
+              <div className="rounded-2xl bg-slate-50 border border-slate-100 p-3 text-sm text-slate-600">
+                Apakah nama pegawai ini sudah sesuai?
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  onClick={retryRecognition}
+                  disabled={isProcessing}
+                  className="py-3 rounded-2xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 disabled:opacity-60"
+                >
+                  Tidak Sesuai
+                </button>
+                <button
+                  onClick={processAttendance}
+                  disabled={isProcessing}
+                  className="py-3 rounded-2xl bg-[#B21B1B] text-white font-bold hover:bg-[#901515] disabled:bg-slate-200 disabled:text-slate-400 flex items-center justify-center gap-2"
+                >
+                  {isProcessing ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white/50 border-t-white rounded-full animate-spin" />
+                      Menyimpan...
+                    </>
+                  ) : (
+                    presensiType === 'masuk' ? 'Ya, Presensi Masuk' : 'Ya, Presensi Pulang'
+                  )}
+                </button>
+              </div>
+            </div>
+          </motion.div>
         </div>
       )}
 
@@ -1253,20 +1432,432 @@ function EmployeePage({ onAdminClick }: { onAdminClick: () => void }) {
               </div>
 
               {/* Button */}
-              <button 
-                onClick={() => setScanResult(null)}
-                className={`w-full py-3.5 rounded-xl font-bold text-white transition-all active:scale-95 ${
-                  scanResult.success 
-                    ? 'bg-green-600 hover:bg-green-700 shadow-lg shadow-green-600/20' 
-                    : 'bg-slate-800 hover:bg-slate-900 shadow-lg shadow-slate-800/20'
-                }`}
-              >
-                OK
-              </button>
+              {scanResult.success ? (
+                <button
+                  onClick={() => setScanResult(null)}
+                  className="w-full py-3.5 rounded-xl font-bold text-white transition-all active:scale-95 bg-green-600 hover:bg-green-700 shadow-lg shadow-green-600/20"
+                >
+                  OK
+                </button>
+              ) : (
+                <button
+                  onClick={() => setScanResult(null)}
+                  className="w-full py-3.5 rounded-xl font-bold text-white transition-all active:scale-95 bg-slate-800 hover:bg-slate-900 shadow-lg shadow-slate-800/20"
+                >
+                  OK
+                </button>
+              )}
             </div>
           </motion.div>
         </div>
       )}
+    </motion.div>
+  );
+}
+
+function FaceRegistrationPage({ onBack }: { onBack: () => void }) {
+  const { showToast } = useToast();
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [selectedName, setSelectedName] = useState('');
+  const [employeeSearch, setEmployeeSearch] = useState('');
+  const [isEmployeeDropdownOpen, setIsEmployeeDropdownOpen] = useState(false);
+  const [snapshots, setSnapshots] = useState<string[]>([]);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [isCameraReady, setIsCameraReady] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isEmployeeLoading, setIsEmployeeLoading] = useState(true);
+  const [isDone, setIsDone] = useState(false);
+  const [registrationError, setRegistrationError] = useState('');
+  const registerVideoRef = useRef<HTMLVideoElement | null>(null);
+  const registerStreamRef = useRef<MediaStream | null>(null);
+  const registerWakeLockRef = useRef<WakeLockSentinel | null>(null);
+
+  const fetchEmployees = async () => {
+    setIsEmployeeLoading(true);
+    try {
+      const data = await api.getEmployees();
+      setEmployees(data);
+    } finally {
+      setIsEmployeeLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchEmployees();
+    return () => stopRegisterCamera();
+  }, []);
+
+  const stopRegisterCamera = () => {
+    void releaseScreenWakeLock(registerWakeLockRef);
+    registerStreamRef.current?.getTracks().forEach(track => track.stop());
+    registerStreamRef.current = null;
+    if (registerVideoRef.current) registerVideoRef.current.srcObject = null;
+    setIsCameraOpen(false);
+    setIsCameraReady(false);
+  };
+
+  const startRegisterCamera = async () => {
+    stopRegisterCamera();
+    setIsCameraOpen(true);
+    setIsCameraReady(false);
+    try {
+      void requestScreenWakeLock(registerWakeLockRef);
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Perangkat ini belum bisa membuka kamera.');
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 720 }, height: { ideal: 720 } },
+        audio: false
+      });
+      registerStreamRef.current = stream;
+      if (registerVideoRef.current) {
+        registerVideoRef.current.srcObject = stream;
+        await registerVideoRef.current.play();
+      }
+    } catch (error) {
+      setIsCameraOpen(false);
+      showToast(error instanceof Error ? error.message : 'Kamera belum bisa dibuka', 'error');
+    }
+  };
+
+  const handleSelectEmployee = (name: string) => {
+    setSelectedName(name);
+    setEmployeeSearch(name);
+    setIsEmployeeDropdownOpen(false);
+    setSnapshots([]);
+    setIsDone(false);
+    setRegistrationError('');
+    if (name) {
+      setTimeout(() => startRegisterCamera(), 100);
+    } else {
+      stopRegisterCamera();
+    }
+  };
+
+  const handleEmployeeSearchChange = (value: string) => {
+    setEmployeeSearch(value);
+    setIsEmployeeDropdownOpen(true);
+    if (value !== selectedName) {
+      setSelectedName('');
+      setSnapshots([]);
+      setIsDone(false);
+      setRegistrationError('');
+      stopRegisterCamera();
+    }
+  };
+
+  const captureRegisterPhoto = () => {
+    const video = registerVideoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight || snapshots.length >= 3) return;
+
+    const size = Math.min(video.videoWidth, video.videoHeight);
+    const sx = (video.videoWidth - size) / 2;
+    const sy = (video.videoHeight - size) / 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = 720;
+    canvas.height = 720;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, sx, sy, size, size, 0, 0, canvas.width, canvas.height);
+    setRegistrationError('');
+    setSnapshots(prev => [...prev, canvas.toDataURL('image/jpeg', 0.86)]);
+  };
+
+  const saveFaceRegistration = async () => {
+    if (!selectedName || snapshots.length < 3 || isSaving) return;
+    setIsSaving(true);
+    try {
+      const result = await api.registerFace(selectedName, snapshots);
+      if (result.success) {
+        showToast(result.message || 'Wajah pegawai berhasil diregistrasi', 'success');
+        setIsDone(true);
+        setRegistrationError('');
+        stopRegisterCamera();
+        await fetchEmployees();
+      } else {
+        const message = result.message || 'Registrasi wajah belum berhasil. Ambil ulang 3 foto wajah.';
+        setSnapshots([]);
+        setRegistrationError(message);
+        showToast(message, 'error');
+      }
+    } catch (_error) {
+      const message = 'Registrasi wajah belum berhasil. Periksa koneksi ke server, lalu ambil ulang foto.';
+      setSnapshots([]);
+      setRegistrationError(message);
+      showToast(message, 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const resetRegistration = () => {
+    setSnapshots([]);
+    setIsDone(false);
+    setRegistrationError('');
+    if (selectedName) {
+      setTimeout(() => startRegisterCamera(), 100);
+    }
+  };
+
+  const step = snapshots.length;
+  const stepInfo = [
+    {
+      title: 'Tahap 1: Hadap Lurus',
+      desc: 'Posisikan wajah menghadap lurus ke kamera.',
+      className: 'bg-blue-50 border-blue-100 text-blue-800'
+    },
+    {
+      title: 'Tahap 2: Menoleh ke Kanan',
+      desc: 'Putar wajah sedikit ke arah kanan.',
+      className: 'bg-amber-50 border-amber-100 text-amber-800'
+    },
+    {
+      title: 'Tahap 3: Menoleh ke Kiri',
+      desc: 'Putar wajah sedikit ke arah kiri.',
+      className: 'bg-purple-50 border-purple-100 text-purple-800'
+    },
+    {
+      title: 'Semua Foto Diambil',
+      desc: 'Simpan data wajah agar pegawai bisa presensi.',
+      className: 'bg-green-50 border-green-100 text-green-800'
+    }
+  ][Math.min(step, 3)];
+
+  const selectedEmployee = employees.find(emp => emp.name === selectedName);
+  const activeEmployees = employees.filter(emp => emp.status === 'AKTIF');
+  const searchValue = employeeSearch.trim().toLowerCase();
+  const filteredEmployees = activeEmployees
+    .filter(emp => !searchValue || emp.name.toLowerCase().includes(searchValue))
+    .slice(0, 8);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      className="max-w-xl mx-auto p-4 space-y-4"
+    >
+      <div className="flex justify-between items-center py-2">
+        <button
+          onClick={() => { stopRegisterCamera(); onBack(); }}
+          className="h-10 px-3 bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-full flex items-center gap-2 text-xs font-extrabold"
+        >
+          <ArrowLeft size={16} />
+          Kembali
+        </button>
+        <img src={GIAT_LOGO_URL} alt="Logo Giat" className="h-10" />
+      </div>
+
+      <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 space-y-6">
+        <div className="text-center">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-red-50 text-[#B21B1B] flex items-center justify-center mb-3">
+            <UserPlus size={26} />
+          </div>
+          <h2 className="text-2xl font-black text-slate-800">Registrasi Wajah</h2>
+          <p className="text-sm text-slate-500 mt-1">Ambil 3 foto wajah untuk membuat data pengenal yang lebih stabil.</p>
+        </div>
+
+        {!isDone ? (
+          <>
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Pilih Pegawai</label>
+              <div className="relative">
+                <div className="relative">
+                  <Search size={17} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={employeeSearch}
+                    onFocus={() => setIsEmployeeDropdownOpen(true)}
+                    onBlur={() => window.setTimeout(() => setIsEmployeeDropdownOpen(false), 160)}
+                    onChange={e => handleEmployeeSearchChange(e.target.value)}
+                    placeholder="Ketik nama pegawai..."
+                    className="w-full pl-10 pr-3.5 py-3.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-500/20 outline-none transition-all text-sm bg-white"
+                  />
+                </div>
+                {isEmployeeDropdownOpen && (
+                  <div className="absolute z-30 mt-2 w-full rounded-2xl border border-slate-200 bg-white shadow-xl overflow-hidden">
+                    {isEmployeeLoading ? (
+                      <div className="px-4 py-6 flex flex-col items-center justify-center gap-3 text-sm text-slate-500">
+                        <div className="w-8 h-8 border-4 border-slate-200 border-t-[#B21B1B] rounded-full animate-spin" />
+                        <span className="font-bold">Memuat data pegawai...</span>
+                      </div>
+                    ) : filteredEmployees.length > 0 ? (
+                      <div className="max-h-72 overflow-y-auto">
+                        {filteredEmployees.map(emp => (
+                          <button
+                            key={emp.id || emp.name}
+                            type="button"
+                            onClick={() => handleSelectEmployee(emp.name)}
+                            className="w-full px-3 py-3 flex items-center gap-3 text-left hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-b-0"
+                          >
+                            <ProfilePhoto
+                              src={emp.photo_url}
+                              alt={emp.name}
+                              className="w-11 h-11 rounded-xl border border-slate-200 flex-shrink-0"
+                              iconSize={18}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="font-extrabold text-sm text-slate-800 truncate">{emp.name}</div>
+                              <div className={`text-[10px] font-bold uppercase tracking-wider ${emp.face_registered ? 'text-green-600' : 'text-orange-500'}`}>
+                                {emp.face_registered ? 'Wajah terdaftar' : 'Belum daftar wajah'}
+                              </div>
+                            </div>
+                            <ChevronRight size={16} className="text-slate-300 flex-shrink-0" />
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="px-4 py-5 text-center text-sm text-slate-400">
+                        Nama pegawai tidak ditemukan.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              {!isEmployeeLoading && activeEmployees.length === 0 && (
+                <p className="text-xs text-slate-400 mt-2">Belum ada pegawai aktif. Tambahkan pegawai dari halaman admin terlebih dahulu.</p>
+              )}
+            </div>
+
+            {selectedName && (
+              <div className="space-y-5">
+                <div className={`rounded-xl border p-3 text-center ${stepInfo.className}`}>
+                  <div className="font-extrabold text-sm">{stepInfo.title}</div>
+                  <div className="text-xs mt-1">{stepInfo.desc}</div>
+                </div>
+
+                {registrationError && (
+                  <div className="rounded-xl border border-red-100 bg-red-50 p-3 text-center">
+                    <div className="font-extrabold text-sm text-red-700">Registrasi Gagal</div>
+                    <div className="text-xs text-red-600 mt-1 leading-relaxed">{registrationError}</div>
+                  </div>
+                )}
+
+                <div className="relative w-full max-w-[320px] aspect-square mx-auto rounded-[32px] overflow-hidden bg-black border border-slate-200 shadow-xl">
+                  {isCameraOpen ? (
+                    <video
+                      ref={registerVideoRef}
+                      playsInline
+                      muted
+                      onLoadedMetadata={() => setIsCameraReady(true)}
+                      onCanPlay={() => setIsCameraReady(true)}
+                      className="w-full h-full object-cover scale-x-[-1] brightness-[1.18] contrast-[1.08] saturate-[1.04]"
+                    />
+                  ) : (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-white/60 gap-2">
+                      <Camera size={34} />
+                      <span className="text-xs font-bold">Kamera nonaktif</span>
+                    </div>
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-transparent to-black/45 pointer-events-none" />
+                  <div className="absolute inset-8 rounded-[999px] border border-white/60 shadow-[0_0_0_999px_rgba(0,0,0,0.18)] camera-guide-breathe pointer-events-none" />
+                  <div className="absolute left-5 top-5 w-10 h-10 border-l-4 border-t-4 border-white/85 rounded-tl-2xl pointer-events-none" />
+                  <div className="absolute right-5 top-5 w-10 h-10 border-r-4 border-t-4 border-white/85 rounded-tr-2xl pointer-events-none" />
+                  <div className="absolute left-5 bottom-5 w-10 h-10 border-l-4 border-b-4 border-white/85 rounded-bl-2xl pointer-events-none" />
+                  <div className="absolute right-5 bottom-5 w-10 h-10 border-r-4 border-b-4 border-white/85 rounded-br-2xl pointer-events-none" />
+                  {!isCameraReady && isCameraOpen && (
+                    <div className="absolute inset-0 bg-black/50 flex items-center justify-center text-white text-sm font-bold backdrop-blur-sm">
+                      <div className="flex flex-col items-center gap-3">
+                        <div className="w-10 h-10 rounded-full border-4 border-white/30 border-t-white animate-spin" />
+                        Menyiapkan kamera...
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  {[0, 1, 2].map(index => (
+                    <div key={index} className="aspect-square rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center">
+                      {snapshots[index] ? (
+                        <img src={snapshots[index]} alt={`Foto wajah ${index + 1}`} className="w-full h-full object-cover" />
+                      ) : (
+                        <span className="text-xs font-extrabold text-slate-300">{index + 1}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    onClick={captureRegisterPhoto}
+                    disabled={!isCameraReady || snapshots.length >= 3}
+                    className={`py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
+                      !isCameraReady || snapshots.length >= 3
+                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                        : 'bg-slate-900 text-white hover:bg-black'
+                    }`}
+                  >
+                    <Camera size={18} />
+                    Ambil Foto ({snapshots.length}/3)
+                  </button>
+                  <button
+                    onClick={saveFaceRegistration}
+                    disabled={snapshots.length < 3 || isSaving}
+                    className={`py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
+                      snapshots.length < 3 || isSaving
+                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                      : 'bg-[#B21B1B] text-white hover:bg-[#901515]'
+                    }`}
+                  >
+                    Simpan Wajah
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="py-8 text-center space-y-5">
+            <div className="w-20 h-20 mx-auto rounded-full bg-green-50 flex items-center justify-center">
+              <CheckCircle2 size={40} className="text-green-500" />
+            </div>
+            <div>
+              <h3 className="text-xl font-black text-slate-800">Registrasi Berhasil</h3>
+              <p className="text-sm text-slate-500 mt-2">
+                Wajah {selectedEmployee?.name || selectedName} sudah tersimpan dan siap dipakai untuk presensi.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button onClick={resetRegistration} className="py-3 rounded-xl bg-slate-100 text-slate-700 font-bold hover:bg-slate-200 flex items-center justify-center gap-2">
+                <UserPlus size={18} />
+                Daftar Ulang
+              </button>
+              <button onClick={() => { setSelectedName(''); setSnapshots([]); setIsDone(false); }} className="py-3 rounded-xl bg-[#B21B1B] text-white font-bold hover:bg-[#901515]">
+                Pegawai Lain
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {isSaving && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/55 p-5 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 16 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ type: 'spring', damping: 22, stiffness: 280 }}
+              className="w-full max-w-sm overflow-hidden rounded-3xl bg-white shadow-2xl"
+              role="status"
+              aria-live="polite"
+            >
+              <div className="h-2 bg-[#B21B1B]" />
+              <div className="p-7 text-center">
+                <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-red-50">
+                  <div className="h-10 w-10 rounded-full border-4 border-[#B21B1B]/20 border-t-[#B21B1B] animate-spin" />
+                </div>
+                <h3 className="mt-5 text-lg font-black text-slate-800">Menyimpan registrasi wajah</h3>
+                <p className="mt-2 text-sm leading-relaxed text-slate-500">
+                  Foto wajah {selectedName} sedang diproses dan disimpan. Tunggu sampai proses selesai.
+                </p>
+                <div className="mt-5 rounded-2xl border border-slate-100 bg-slate-50 p-3 text-xs font-bold text-slate-500">
+                  Mengunggah 3 foto dan membuat data pengenal wajah...
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
@@ -1370,7 +1961,7 @@ function AdminLogin({ onLoginSuccess, onBack }: { onLoginSuccess: () => void; on
 
 function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   const { showToast } = useToast();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'employees' | 'master-data' | 'attendance-photos' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<AdminTab>(() => readStoredAdminTab());
   const [isDesktopCollapsed, setIsDesktopCollapsed] = useState(false);
   const [attendanceData, setAttendanceData] = useState<AttendanceData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1394,6 +1985,11 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
 
   const handleLogout = async () => {
     await api.logout();
+    try {
+      localStorage.setItem(APP_VIEW_STORAGE_KEY, 'employee');
+      localStorage.setItem(ADMIN_TAB_STORAGE_KEY, 'dashboard');
+    } catch (_error) {}
+    updateAppHash('employee');
     onLogout();
   };
 
@@ -1401,6 +1997,13 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
     fetchData();
     fetchAdminSettings();
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ADMIN_TAB_STORAGE_KEY, activeTab);
+    } catch (_error) {}
+    updateAppHash('admin-dashboard', activeTab);
+  }, [activeTab]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -2090,6 +2693,60 @@ function Modal({ title, children, onClose }: { title: string; children: React.Re
   );
 }
 
+function Pagination({ currentPage, totalPages, onPageChange }: { currentPage: number; totalPages: number; onPageChange: (page: number) => void }) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex items-center justify-between px-4 py-3 sm:px-6 bg-white border-t border-slate-100 rounded-b-2xl">
+      <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm text-slate-700">
+            Menampilkan halaman <span className="font-bold">{currentPage}</span> dari <span className="font-bold">{totalPages}</span>
+          </p>
+        </div>
+        <div>
+          <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+            <button
+              onClick={() => onPageChange(currentPage - 1)}
+              disabled={currentPage === 1}
+              className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-slate-300 bg-white text-sm font-medium text-slate-500 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span className="sr-only">Previous</span>
+              <ChevronLeft size={16} />
+            </button>
+            <button
+              onClick={() => onPageChange(currentPage + 1)}
+              disabled={currentPage === totalPages}
+              className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-slate-300 bg-white text-sm font-medium text-slate-500 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span className="sr-only">Next</span>
+              <ChevronRight size={16} />
+            </button>
+          </nav>
+        </div>
+      </div>
+      <div className="flex items-center justify-between w-full sm:hidden">
+        <button
+          onClick={() => onPageChange(currentPage - 1)}
+          disabled={currentPage === 1}
+          className="relative inline-flex items-center px-4 py-2 border border-slate-300 text-sm font-medium rounded-md text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-50"
+        >
+          Sebelumnya
+        </button>
+        <span className="text-sm text-slate-600 font-medium">
+          {currentPage} / {totalPages}
+        </span>
+        <button
+          onClick={() => onPageChange(currentPage + 1)}
+          disabled={currentPage === totalPages}
+          className="relative inline-flex items-center px-4 py-2 border border-slate-300 text-sm font-medium rounded-md text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-50"
+        >
+          Berikutnya
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TimePicker({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   const [hour = '08', minute = '00'] = value.split(':');
   return (
@@ -2132,6 +2789,12 @@ function AttendancePhotosView({ onChanged }: { onChanged: () => void }) {
   const [loading, setLoading] = useState(true);
   const [previewPhoto, setPreviewPhoto] = useState<AttendancePhoto | null>(null);
   const [deletingPhotoKey, setDeletingPhotoKey] = useState<string | null>(null);
+
+  // Pagination for Photos
+  const [photoPage, setPhotoPage] = useState(1);
+  const photosPerPage = 12;
+  const totalPhotoPages = Math.max(1, Math.ceil(photos.length / photosPerPage));
+  const paginatedPhotos = photos.slice((photoPage - 1) * photosPerPage, photoPage * photosPerPage);
 
   const fetchPhotos = async () => {
     setLoading(true);
@@ -2185,7 +2848,7 @@ function AttendancePhotosView({ onChanged }: { onChanged: () => void }) {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
-        {photos.map(photo => {
+        {paginatedPhotos.map(photo => {
           const isDeleting = deletingPhotoKey === photoKey(photo);
           return (
           <div key={photoKey(photo)} className={`bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden transition-opacity ${isDeleting ? 'opacity-70 pointer-events-none' : ''}`}>
@@ -2233,6 +2896,14 @@ function AttendancePhotosView({ onChanged }: { onChanged: () => void }) {
         )}
       </div>
 
+      {photos.length > 0 && (
+        <Pagination 
+          currentPage={photoPage}
+          totalPages={totalPhotoPages}
+          onPageChange={setPhotoPage}
+        />
+      )}
+
       {previewPhoto && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <button
@@ -2270,18 +2941,23 @@ function MasterDataView() {
   const { showToast, showConfirm } = useToast();
   const [subTab, setSubTab] = useState<'employees' | 'locations' | 'shifts'>('employees');
   const [employees, setEmployees] = useState<Employee[]>([]);
-  const [locations, setLocations] = useState<string[]>([]);
+  const [locations, setLocations] = useState<Location[]>([]);
   const [shifts, setShifts] = useState<Record<string, { start_time: string; end_time: string; is_overtime: boolean }>>({});
   const [loading, setLoading] = useState(true);
 
+  // Pagination for Employees
+  const [empPage, setEmpPage] = useState(1);
+  const empPerPage = 10;
+  const totalEmpPages = Math.max(1, Math.ceil(employees.length / empPerPage));
+  const paginatedEmployees = employees.slice((empPage - 1) * empPerPage, empPage * empPerPage);
+
+  // Modals
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
+  const [editingLocation, setEditingLocation] = useState<Location | null>(null);
+  const [managingLocationEmployee, setManagingLocationEmployee] = useState<Employee | null>(null);
+
   // Form states
   const [newEmpName, setNewEmpName] = useState('');
-  const [newEmpPhotoDataUrl, setNewEmpPhotoDataUrl] = useState('');
-  const [newEmpPhotoPreview, setNewEmpPhotoPreview] = useState('');
-  const [selectedQrEmployee, setSelectedQrEmployee] = useState<Employee | null>(null);
-  const [savingQrName, setSavingQrName] = useState<string | null>(null);
-  const [downloadingQrName, setDownloadingQrName] = useState<string | null>(null);
-  const [uploadingPhotoName, setUploadingPhotoName] = useState<string | null>(null);
   const [newLocation, setNewLocation] = useState('');
   const [newShiftName, setNewShiftName] = useState('');
   const [newShiftTime, setNewShiftTime] = useState('08:00');
@@ -2298,7 +2974,7 @@ function MasterDataView() {
     setLoading(true);
     const [empData, locData, shiftData] = await Promise.all([
       api.getEmployees(),
-      api.getLocations(),
+      api.getAdminLocations(),
       api.getShifts()
     ]);
     setEmployees(empData);
@@ -2311,48 +2987,23 @@ function MasterDataView() {
 
   // === EMPLOYEE HANDLERS ===
   const handleAddEmployee = async () => {
-    if (!newEmpName.trim()) return;
-    const result = await api.addEmployee({ name: newEmpName.trim(), status: 'AKTIF', photoDataUrl: newEmpPhotoDataUrl || undefined });
+    if (!newEmpName.trim()) {
+      showToast('Nama pegawai wajib diisi', 'error');
+      return;
+    }
+    const result = await api.addEmployee({ name: newEmpName.trim(), status: 'AKTIF' });
     if (result.success) {
       setNewEmpName('');
-      setNewEmpPhotoDataUrl('');
-      setNewEmpPhotoPreview('');
-      showToast('Pegawai berhasil ditambahkan', 'success');
+      showToast(result.message || 'Pegawai berhasil ditambahkan', 'success');
       fetchAll();
     } else {
       showToast(result.message || 'Gagal menambahkan pegawai', 'error');
     }
   };
 
-  const handleEmployeePhotoChange = async (file?: File) => {
-    if (!file) return;
-    const dataUrl = await imageFileToCompressedDataUrl(file);
-    setNewEmpPhotoDataUrl(dataUrl);
-    setNewEmpPhotoPreview(dataUrl);
-  };
-
   const handleUpdateEmployeeStatus = async (name: string, status: string) => {
     await api.updateEmployee(name, status);
     fetchAll();
-  };
-
-  const handleUpdateEmployeePhoto = async (name: string, file?: File) => {
-    if (!file) return;
-    setUploadingPhotoName(name);
-    try {
-      const photoDataUrl = await imageFileToCompressedDataUrl(file);
-      const result = await api.updateEmployeePhoto(name, photoDataUrl);
-      if (result.success) {
-        showToast('Foto pegawai berhasil diperbarui', 'success');
-        await fetchAll();
-      } else {
-        showToast(result.message || 'Foto pegawai belum berhasil diperbarui', 'error');
-      }
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Foto pegawai belum berhasil diperbarui', 'error');
-    } finally {
-      setUploadingPhotoName(null);
-    }
   };
 
   const handleDeleteEmployee = async (name: string) => {
@@ -2363,59 +3014,10 @@ function MasterDataView() {
     });
   };
 
-  const handleSaveQrToCdn = async (employee: Employee) => {
-    if (!employee.qr_code) return;
-    setSavingQrName(employee.name);
-    try {
-      const qrDataUrl = await createStyledQrDataUrl(employee.qr_code);
-      const result = await api.saveEmployeeQrImage(employee.name, qrDataUrl);
-      if (result.success) {
-        showToast('QR berhasil disimpan', 'success');
-        await fetchAll();
-        setSelectedQrEmployee(prev => prev?.name === employee.name ? { ...prev, qr_url: result.qr_url, qr_file_id: result.qr_file_id } : prev);
-      } else {
-        showToast(result.message || 'Gagal menyimpan QR', 'error');
-      }
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Gagal membuat QR berlogo', 'error');
-    } finally {
-      setSavingQrName(null);
-    }
-  };
-
-  const handleDownloadEmployeeQr = async (employee: Employee) => {
-    if (!employee.qr_code) {
-      showToast('QR pegawai belum tersedia', 'error');
-      return;
-    }
-    setDownloadingQrName(employee.name);
-    try {
-      const dataUrl = await createEmployeeQrDownloadDataUrl(employee);
-      downloadDataUrl(dataUrl, `qr-presensi-${sanitizeFileName(employee.name)}.png`);
-      showToast('QR berhasil diunduh', 'success');
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Gagal mengunduh QR', 'error');
-    } finally {
-      setDownloadingQrName(null);
-    }
-  };
-
   // === LOCATION HANDLERS ===
-  const handleAddLocation = async () => {
-    if (!newLocation.trim()) return;
-    const result = await api.addLocation(newLocation.trim());
-    if (result.success) {
-      setNewLocation('');
-      showToast('Lokasi berhasil ditambahkan', 'success');
-      fetchAll();
-    } else {
-      showToast(result.message || 'Gagal menambahkan lokasi', 'error');
-    }
-  };
-
-  const handleDeleteLocation = async (name: string) => {
+  const handleDeleteLocation = async (id: number, name: string) => {
     showConfirm(`Hapus lokasi "${name}"?\n\nData absensi yang sudah tercatat TETAP tersimpan di riwayat.`, async () => {
-      const result = await api.deleteLocation(name);
+      const result = await api.deleteAdminLocation(id);
       if (result.message) showToast(result.message, 'info');
       fetchAll();
     });
@@ -2509,7 +3111,7 @@ function MasterDataView() {
           <div className="bg-white p-4 sm:p-6 rounded-3xl shadow-sm border border-slate-100">
             <h3 className="font-extrabold text-slate-800 mb-4">Tambah Pegawai Baru</h3>
             <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-start">
-              <div className="space-y-3">
+              <div>
                 <input
                   type="text"
                   value={newEmpName}
@@ -2517,18 +3119,17 @@ function MasterDataView() {
                   placeholder="Nama pegawai"
                   className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none"
                 />
-                <label className="flex items-center gap-3 p-3 rounded-xl border border-dashed border-slate-300 bg-slate-50 cursor-pointer hover:bg-slate-100">
-                  <div className="w-12 h-12 rounded-xl bg-white border border-slate-200 overflow-hidden flex items-center justify-center flex-shrink-0">
-                    {newEmpPhotoPreview ? <img src={newEmpPhotoPreview} alt="Preview pegawai" className="w-full h-full object-cover" /> : <Upload size={18} className="text-slate-400" />}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-sm font-bold text-slate-700">Foto pegawai</div>
-                    <div className="text-xs text-slate-400 truncate">JPG/PNG, opsional</div>
-                  </div>
-                  <input type="file" accept="image/*" className="hidden" onChange={e => handleEmployeePhotoChange(e.target.files?.[0])} />
-                </label>
+                <p className="text-xs text-slate-400 mt-2">Foto wajah didaftarkan dari halaman user melalui tombol Daftar Wajah.</p>
               </div>
-              <button onClick={handleAddEmployee} className="px-6 py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap">
+              <button
+                onClick={handleAddEmployee}
+                disabled={!newEmpName.trim()}
+                className={`px-6 py-3 rounded-xl font-bold transition-all active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap ${
+                  !newEmpName.trim()
+                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                    : 'bg-[#B21B1B] text-white hover:bg-[#901515]'
+                }`}
+              >
                 <Plus size={16} /> Tambah
               </button>
             </div>
@@ -2542,19 +3143,22 @@ function MasterDataView() {
 
             {/* Mobile card view */}
             <div className="sm:hidden divide-y divide-slate-50">
-              {employees.map((emp, i) => (
+              {paginatedEmployees.map((emp, i) => (
                 <div key={emp.name} className="px-4 py-3 flex items-center justify-between gap-3 hover:bg-slate-50/50">
                   <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <span className="text-slate-400 text-xs font-medium w-5 flex-shrink-0">{i + 1}</span>
-                    <label className={`relative w-9 h-9 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden cursor-pointer ${uploadingPhotoName === emp.name ? 'pointer-events-none' : ''}`} title="Ganti foto pegawai">
-                      {emp.photo_url ? <img src={emp.photo_url} alt={emp.name} className="w-full h-full object-cover" /> : <User size={16} className="text-slate-500" />}
-                      <span className={`absolute inset-0 bg-black/35 transition-opacity flex items-center justify-center text-white ${uploadingPhotoName === emp.name ? 'opacity-100' : 'opacity-0 hover:opacity-100'}`}>
-                        {uploadingPhotoName === emp.name ? <div className="w-4 h-4 border-2 border-white/50 border-t-white rounded-full animate-spin" /> : <Camera size={13} />}
+                    <span className="text-slate-400 text-xs font-medium w-5 flex-shrink-0">{(empPage - 1) * empPerPage + i + 1}</span>
+                    <ProfilePhoto
+                      src={emp.photo_url}
+                      alt={emp.name}
+                      className="w-9 h-9 rounded-full border border-slate-200 flex-shrink-0"
+                      iconSize={16}
+                    />
+                    <div className="min-w-0">
+                      <span className="font-bold text-slate-800 truncate block">{emp.name}</span>
+                      <span className={`text-[9px] font-bold uppercase tracking-wider ${emp.face_registered ? 'text-green-600' : 'text-orange-500'}`}>
+                        {emp.face_registered ? 'Wajah terdaftar' : 'Belum daftar wajah'}
                       </span>
-                      <input type="file" accept="image/*" className="hidden" onChange={e => handleUpdateEmployeePhoto(emp.name, e.target.files?.[0])} />
-                    </label>
-                    <span className="font-bold text-slate-800 truncate">{emp.name}</span>
-                    {emp.qr_code && <QrWithLogo qrCode={emp.qr_code} employeeName={emp.name} sizeClass="w-9 h-9" onClick={() => setSelectedQrEmployee(emp)} />}
+                    </div>
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <div className="relative">
@@ -2573,6 +3177,9 @@ function MasterDataView() {
                       </select>
                       <ChevronRight size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 rotate-90 pointer-events-none opacity-50" />
                     </div>
+                    <button onClick={() => setManagingLocationEmployee(emp)} className="p-1.5 hover:bg-blue-50 rounded-lg text-blue-400" title="Atur Lokasi">
+                      <MapPin size={14} />
+                    </button>
                     <button onClick={() => handleDeleteEmployee(emp.name)} className="p-1.5 hover:bg-red-50 rounded-lg text-red-400">
                       <Trash2 size={14} />
                     </button>
@@ -2592,35 +3199,39 @@ function MasterDataView() {
                     <th className="px-6 py-4">#</th>
                     <th className="px-6 py-4">Foto</th>
                     <th className="px-6 py-4">Nama</th>
-                    <th className="px-6 py-4">QR Presensi</th>
+                    <th className="px-6 py-4">Face Recognition</th>
                     <th className="px-6 py-4">Status</th>
                     <th className="px-6 py-4">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
-                  {employees.map((emp, i) => (
+                  {paginatedEmployees.map((emp, i) => (
                     <tr key={emp.name} className="hover:bg-slate-50/50 transition-colors text-sm">
-                      <td className="px-6 py-4 text-slate-400">{i + 1}</td>
+                      <td className="px-6 py-4 text-slate-400">{(empPage - 1) * empPerPage + i + 1}</td>
                       <td className="px-6 py-4">
-                        <label className={`group relative w-12 h-12 rounded-xl overflow-hidden bg-slate-100 flex items-center justify-center border border-slate-200 cursor-pointer ${uploadingPhotoName === emp.name ? 'pointer-events-none' : ''}`} title="Ganti foto pegawai">
-                          {emp.photo_url ? <img src={emp.photo_url} alt={emp.name} className="w-full h-full object-cover" /> : <User size={18} className="text-slate-400" />}
-                          <span className={`absolute inset-0 bg-black/40 transition-opacity flex items-center justify-center text-white ${uploadingPhotoName === emp.name ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
-                            {uploadingPhotoName === emp.name ? <div className="w-5 h-5 border-2 border-white/50 border-t-white rounded-full animate-spin" /> : <Camera size={16} />}
-                          </span>
-                          <input type="file" accept="image/*" className="hidden" onChange={e => handleUpdateEmployeePhoto(emp.name, e.target.files?.[0])} />
-                        </label>
+                        <ProfilePhoto
+                          src={emp.photo_url}
+                          alt={emp.name}
+                          className="w-12 h-12 rounded-xl border border-slate-200"
+                          iconSize={18}
+                        />
                         <div className="text-[10px] text-slate-400 mt-1 font-medium">
-                          {uploadingPhotoName === emp.name ? 'Mengunggah...' : 'Klik foto untuk ganti'}
+                          Dari foto pertama registrasi wajah
                         </div>
                       </td>
                       <td className="px-6 py-4 font-bold text-slate-800">{emp.name}</td>
                       <td className="px-6 py-4">
-                        {emp.qr_code ? (
-                          <div className="inline-flex items-center gap-3">
-                            <QrWithLogo qrCode={emp.qr_code} employeeName={emp.name} sizeClass="w-16 h-16" onClick={() => setSelectedQrEmployee(emp)} />
-                            <span className="text-xs font-bold text-slate-400">Klik QR untuk preview</span>
+                        <div className="inline-flex items-center gap-2">
+                          <span className={`w-8 h-8 rounded-lg flex items-center justify-center ${emp.face_registered ? 'bg-green-50 text-green-600' : 'bg-orange-50 text-orange-500'}`}>
+                            {emp.face_registered ? <CheckCircle2 size={16} /> : <Camera size={16} />}
+                          </span>
+                          <div>
+                            <div className={`text-xs font-extrabold ${emp.face_registered ? 'text-green-600' : 'text-orange-500'}`}>
+                              {emp.face_registered ? 'Terdaftar' : 'Belum terdaftar'}
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-medium">Registrasi ulang dari halaman user</div>
                           </div>
-                        ) : <span className="text-slate-300">-</span>}
+                        </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="relative inline-block">
@@ -2641,6 +3252,9 @@ function MasterDataView() {
                         </div>
                       </td>
                       <td className="px-6 py-4">
+                        <button onClick={() => setManagingLocationEmployee(emp)} className="p-2 hover:bg-blue-50 rounded-lg text-blue-400 hover:text-blue-600 transition-colors" title="Atur Lokasi">
+                          <MapPin size={16} />
+                        </button>
                         <button onClick={() => handleDeleteEmployee(emp.name)} className="p-2 hover:bg-red-50 rounded-lg text-red-400 hover:text-red-600 transition-colors" title="Hapus">
                           <Trash2 size={16} />
                         </button>
@@ -2653,6 +3267,12 @@ function MasterDataView() {
                 </tbody>
               </table>
             </div>
+            
+            <Pagination 
+              currentPage={empPage}
+              totalPages={totalEmpPages}
+              onPageChange={setEmpPage}
+            />
           </div>
         </div>
       )}
@@ -2660,41 +3280,40 @@ function MasterDataView() {
       {/* === LOKASI === */}
       {subTab === 'locations' && (
         <div className="space-y-6">
-          {/* Form tambah */}
-          <div className="bg-white p-4 sm:p-6 rounded-3xl shadow-sm border border-slate-100">
-            <h3 className="font-extrabold text-slate-800 mb-4">Tambah Lokasi Baru</h3>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <input
-                type="text"
-                value={newLocation}
-                onChange={e => setNewLocation(e.target.value)}
-                placeholder="Nama lokasi kerja"
-                className="flex-1 p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:ring-2 focus:ring-[#B21B1B]/20 outline-none"
-              />
-              <button onClick={handleAddLocation} className="px-6 py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap">
-                <Plus size={16} /> Tambah
-              </button>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-4 sm:p-6 rounded-3xl shadow-sm border border-slate-100 gap-4">
+            <div>
+              <h3 className="font-extrabold text-slate-800">Daftar Lokasi Kerja</h3>
+              <p className="text-xs text-slate-500 mt-1">Atur area geofence untuk presensi</p>
             </div>
+            <button onClick={() => { setEditingLocation(null); setIsLocationModalOpen(true); }} className="w-full sm:w-auto px-6 py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-[#901515] transition-all active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap">
+              <Plus size={16} /> Tambah Lokasi
+            </button>
           </div>
 
-          {/* List lokasi */}
           <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
-            <div className="p-4 sm:p-6 border-b border-slate-100">
-              <h3 className="font-extrabold text-slate-800">Daftar Lokasi ({locations.length})</h3>
-            </div>
             <div className="divide-y divide-slate-50">
               {locations.map((loc, i) => (
-                <div key={loc} className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 hover:bg-slate-50/50 transition-colors gap-2">
+                <div key={loc.id} className="flex flex-col sm:flex-row sm:items-center justify-between px-4 sm:px-6 py-4 hover:bg-slate-50/50 transition-colors gap-4">
                   <div className="flex items-center gap-3 min-w-0 flex-1">
                     <span className="text-slate-400 text-xs font-medium w-5 sm:w-8 flex-shrink-0">{i + 1}</span>
-                    <div className="w-9 h-9 sm:w-10 sm:h-10 bg-blue-50 rounded-xl flex items-center justify-center text-blue-500 flex-shrink-0">
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${loc.is_active ? 'bg-blue-50 text-blue-500' : 'bg-slate-100 text-slate-400'}`}>
                       <MapPin size={18} />
                     </div>
-                    <span className="font-bold text-slate-800 truncate">{loc}</span>
+                    <div className="min-w-0">
+                      <div className="font-bold text-slate-800 truncate flex items-center gap-2">
+                        {loc.name}
+                        {!loc.is_active && <span className="px-2 py-0.5 bg-slate-100 text-slate-500 text-[9px] uppercase tracking-wider rounded-md">Nonaktif</span>}
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-0.5 truncate">{loc.address || 'Tanpa alamat detail'}</div>
+                      <div className="text-[10px] font-medium text-slate-400 mt-0.5">Radius: {loc.radius_meter}m • Akurasi max: {loc.max_accuracy_meter}m</div>
+                    </div>
                   </div>
-                  <button onClick={() => handleDeleteLocation(loc)} className="p-2 hover:bg-red-50 rounded-lg text-red-400 hover:text-red-600 transition-colors flex-shrink-0" title="Hapus">
-                    <Trash2 size={16} />
-                  </button>
+                  <div className="flex items-center gap-2 pl-12 sm:pl-0">
+                    <button onClick={() => { setEditingLocation(loc); setIsLocationModalOpen(true); }} className="px-4 py-2 hover:bg-slate-100 rounded-xl text-slate-600 text-xs font-bold transition-colors">Edit</button>
+                    <button onClick={() => handleDeleteLocation(loc.id, loc.name)} className="p-2 hover:bg-red-50 rounded-xl text-red-400 hover:text-red-600 transition-colors" title="Hapus">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
               ))}
               {locations.length === 0 && (
@@ -2822,80 +3441,20 @@ function MasterDataView() {
         </div>
       )}
 
-      {selectedQrEmployee && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-          <button
-            onClick={() => setSelectedQrEmployee(null)}
-            className="absolute inset-0"
-            aria-label="Tutup QR"
-          />
-          <div className="relative z-10 w-full max-w-sm bg-white rounded-2xl overflow-hidden shadow-2xl">
-            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="font-extrabold text-slate-800 truncate">{selectedQrEmployee.name}</div>
-                <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 truncate">QR Presensi Pegawai</div>
-              </div>
-              <button onClick={() => setSelectedQrEmployee(null)} className="p-2 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200">
-                <X size={18} />
-              </button>
-            </div>
-            <div className="p-6 flex flex-col items-center gap-4">
-              <QrWithLogo qrCode={selectedQrEmployee.qr_code} employeeName={selectedQrEmployee.name} sizeClass="w-64 h-64" />
-              <div className="w-full rounded-xl bg-slate-50 border border-slate-100 p-3 text-xs text-slate-600 leading-relaxed">
-                QR ini khusus untuk presensi pegawai tersebut. Jangan dibagikan ke pegawai lain.
-              </div>
-              <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <button
-                  onClick={() => handleDownloadEmployeeQr(selectedQrEmployee)}
-                  disabled={downloadingQrName === selectedQrEmployee.name}
-                  className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
-                    downloadingQrName === selectedQrEmployee.name
-                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  {downloadingQrName === selectedQrEmployee.name ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-slate-300 border-t-[#B21B1B] rounded-full animate-spin" />
-                      Menyiapkan...
-                    </>
-                  ) : (
-                    <>
-                      <Download size={16} />
-                      Download QR
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={() => handleSaveQrToCdn(selectedQrEmployee)}
-                  disabled={savingQrName === selectedQrEmployee.name}
-                  className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 ${
-                    savingQrName === selectedQrEmployee.name
-                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                      : 'bg-[#B21B1B] text-white hover:bg-[#901515]'
-                  }`}
-                >
-                  {savingQrName === selectedQrEmployee.name ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-slate-300 border-t-[#B21B1B] rounded-full animate-spin" />
-                      Menyimpan QR...
-                    </>
-                  ) : (
-                    <>
-                      <Upload size={16} />
-                      Simpan QR
-                    </>
-                  )}
-                </button>
-              </div>
-              {selectedQrEmployee.qr_url && (
-                <div className="text-[10px] text-green-600 font-bold uppercase tracking-widest">
-                  QR sudah tersimpan
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+      {isLocationModalOpen && (
+        <LocationFormModal 
+          location={editingLocation}
+          onClose={() => { setIsLocationModalOpen(false); setEditingLocation(null); }}
+          onSave={() => { setIsLocationModalOpen(false); setEditingLocation(null); fetchAll(); }}
+        />
+      )}
+
+      {managingLocationEmployee && managingLocationEmployee.id && (
+        <EmployeeLocationModal
+          employeeId={managingLocationEmployee.id}
+          employeeName={managingLocationEmployee.name}
+          onClose={() => setManagingLocationEmployee(null)}
+        />
       )}
     </div>
   );
@@ -2909,17 +3468,45 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
   const [searchQuery, setSearchQuery] = useState('');
   const [employeeList, setEmployeeList] = useState<Employee[]>([]);
   const [shiftMap, setShiftMap] = useState<Record<string, { is_overtime: boolean }>>({});
+  const [employeeLoading, setEmployeeLoading] = useState(true);
+
+  const fetchEmployeeData = useCallback(async () => {
+    setEmployeeLoading(true);
+    try {
+      const [employees, shifts] = await Promise.all([
+        api.getEmployees(),
+        api.getShifts()
+      ]);
+      setEmployeeList(employees);
+      setShiftMap(shifts);
+    } finally {
+      setEmployeeLoading(false);
+    }
+  }, []);
 
   // Fetch employees & shifts dari database
   useEffect(() => {
-    api.getEmployees().then(data => setEmployeeList(data));
-    api.getShifts().then(data => setShiftMap(data));
-  }, []);
+    fetchEmployeeData();
+    const handleFocus = () => fetchEmployeeData();
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, [fetchEmployeeData]);
 
-  const allEmployees = employeeList.sort((a, b) => a.name.localeCompare(b.name));
+  const employeeProfileMap = new Map<string, Employee>(
+    employeeList.map(emp => [emp.name.trim().toLowerCase(), emp])
+  );
+  const getEmployeeProfile = (name?: string | null) =>
+    name ? employeeProfileMap.get(name.trim().toLowerCase()) || null : null;
+  const allEmployees = [...employeeList].sort((a, b) => a.name.localeCompare(b.name));
   const activeEmployees = allEmployees;
   const displayEmployees = activeEmployees
     .filter(e => e.name.toLowerCase().includes(searchQuery.toLowerCase()));
+
+  // Pagination for Employee Grid
+  const [empPage, setEmpPage] = useState(1);
+  const empPerPage = 12;
+  const totalEmpPages = Math.max(1, Math.ceil(displayEmployees.length / empPerPage));
+  const paginatedDisplayEmployees = displayEmployees.slice((empPage - 1) * empPerPage, empPage * empPerPage);
 
   const todayDateStr = format(new Date(), 'yyyy-MM-dd');
   const uniquePresentToday = new Set(attendanceData.filter(d => {
@@ -2933,6 +3520,7 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
     const dDate = typeof d.Date === 'string' ? d.Date.split('T')[0] : format(new Date(d.Date), 'yyyy-MM-dd');
     return d.Name === selectedEmployee && dDate >= startDate && dDate <= endDate;
   }) : [];
+  const selectedEmployeeProfile = getEmployeeProfile(selectedEmployee);
 
   const totalPresent = stats.length;
   const totalLate = stats.filter(d => d.Status === 'Terlambat').length;
@@ -2963,11 +3551,17 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
           <div className="md:col-span-1 bg-white p-6 rounded-3xl border border-slate-100 shadow-sm flex items-center gap-4">
-            <div className="w-16 h-16 rounded-full bg-slate-200 overflow-hidden relative border-2 border-white shadow-sm flex-shrink-0">
-               <User className="w-full h-full text-slate-400 p-2 bg-slate-100" />
-            </div>
+            <ProfilePhoto
+              src={selectedEmployeeProfile?.photo_url}
+              alt={selectedEmployeeProfile?.name || selectedEmployee}
+              className="w-16 h-16 rounded-full border-2 border-white shadow-sm flex-shrink-0"
+              iconSize={30}
+            />
             <div>
               <h3 className="font-extrabold text-slate-800 text-lg leading-tight">{selectedEmployee}</h3>
+              <div className={`text-[10px] font-bold uppercase tracking-wider mt-1 ${selectedEmployeeProfile?.face_registered ? 'text-green-600' : 'text-orange-500'}`}>
+                {selectedEmployeeProfile?.face_registered ? 'Foto wajah terdaftar' : 'Belum ada foto wajah'}
+              </div>
             </div>
           </div>
           <div className="md:col-span-1 bg-white p-6 rounded-3xl border-t-4 border-t-green-500 shadow-sm flex flex-col justify-center items-center text-center">
@@ -3038,6 +3632,18 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
           <h2 className="text-2xl font-black text-slate-800">Data Pegawai</h2>
           <p className="text-slate-500 text-sm mt-1">Tinjau kinerja tim Koperasi GIAT secara mendalam.</p>
         </div>
+        <button
+          onClick={fetchEmployeeData}
+          disabled={employeeLoading}
+          className="px-4 py-2 rounded-xl bg-red-50 text-[#B21B1B] text-xs font-bold hover:bg-red-100 disabled:opacity-60 flex items-center gap-2"
+        >
+          {employeeLoading ? (
+            <div className="w-3.5 h-3.5 border-2 border-[#B21B1B]/30 border-t-[#B21B1B] rounded-full animate-spin" />
+          ) : (
+            <RefreshCw size={14} />
+          )}
+          Refresh Foto
+        </button>
       </div>
 
       <div className="flex flex-col md:flex-row gap-4 items-stretch">
@@ -3067,15 +3673,31 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        {displayEmployees.map((emp) => (
+        {employeeLoading && (
+          <div className="col-span-full py-16 flex flex-col items-center justify-center gap-3 text-[#B21B1B] bg-white rounded-3xl border border-slate-100">
+            <div className="w-10 h-10 border-4 border-[#B21B1B] border-t-transparent rounded-full animate-spin" />
+            <span className="text-xs font-black uppercase tracking-widest">Memuat foto pegawai...</span>
+          </div>
+        )}
+        {paginatedDisplayEmployees.map((emp) => {
+          return (
           <div key={emp.name} className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 hover:shadow-lg transition-all flex flex-col items-center text-center group relative overflow-hidden">
 
             <div className="relative mb-4">
-              <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center overflow-hidden border-4 border-white shadow-md">
-                <User className="text-slate-400 w-10 h-10" />
+              <ProfilePhoto
+                src={emp.photo_url}
+                alt={emp.name}
+                className="w-24 h-24 rounded-xl border border-slate-200 shadow-sm"
+                iconSize={42}
+              />
+              <div className={`absolute -right-1 -bottom-1 w-6 h-6 rounded-full border-2 border-white flex items-center justify-center ${emp.face_registered ? 'bg-green-500 text-white' : 'bg-slate-300 text-white'}`}>
+                {emp.face_registered ? <CheckCircle2 size={13} /> : <User size={12} />}
               </div>
             </div>
             <h4 className="font-extrabold text-slate-800 text-lg line-clamp-1 w-full px-2" title={emp.name}>{emp.name}</h4>
+            <div className={`text-[10px] font-bold uppercase tracking-wider mt-1 ${emp.face_registered ? 'text-green-600' : 'text-orange-500'}`}>
+              {emp.face_registered ? 'Foto wajah terdaftar' : 'Belum ada foto wajah'}
+            </div>
             <span className={`text-[10px] font-bold uppercase tracking-widest mt-2 mb-6 px-2 py-1 rounded-md ${emp.status === 'AKTIF' ? 'bg-green-50 text-green-500' : emp.status === 'CUTI' ? 'bg-orange-50 text-orange-500' : 'bg-red-50 text-red-500'}`}>
               {emp.status}
             </span>
@@ -3089,17 +3711,20 @@ function EmployeeStatsView({ attendanceData }: { attendanceData: AttendanceData[
               </button>
             </div>
           </div>
-        ))}
-        {displayEmployees.length === 0 && (
+        );
+        })}
+        {!employeeLoading && displayEmployees.length === 0 && (
           <div className="col-span-full py-12 text-center text-slate-400 font-medium italic">Tidak ada pegawai yang sesuai dengan filter.</div>
         )}
       </div>
       
-      <div className="flex justify-center pt-4">
-        <button className="flex items-center gap-2 text-xs font-bold text-slate-500 bg-white border border-slate-200 px-6 py-3 rounded-full hover:bg-slate-50 transition-colors">
-          Muat Lebih Banyak <ChevronRight size={14} className="rotate-90" />
-        </button>
-      </div>
+      {!employeeLoading && displayEmployees.length > 0 && (
+        <Pagination 
+          currentPage={empPage}
+          totalPages={totalEmpPages}
+          onPageChange={setEmpPage}
+        />
+      )}
     </div>
   );
 }

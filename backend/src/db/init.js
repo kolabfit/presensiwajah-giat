@@ -40,6 +40,8 @@ async function initDatabase() {
         qr_url TEXT,
         photo_file_id VARCHAR(120) DEFAULT NULL,
         photo_url TEXT,
+        face_registered BOOLEAN DEFAULT FALSE,
+        face_descriptor JSON DEFAULT NULL,
         status ENUM('AKTIF', 'CUTI', 'NONAKTIF') DEFAULT 'AKTIF',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -49,6 +51,8 @@ async function initDatabase() {
     await addColumnIfMissing(connection, 'employees', 'qr_url', 'TEXT');
     await addColumnIfMissing(connection, 'employees', 'photo_file_id', 'VARCHAR(120) DEFAULT NULL');
     await addColumnIfMissing(connection, 'employees', 'photo_url', 'TEXT');
+    await addColumnIfMissing(connection, 'employees', 'face_registered', 'BOOLEAN DEFAULT FALSE');
+    await addColumnIfMissing(connection, 'employees', 'face_descriptor', 'JSON DEFAULT NULL');
     await connection.query("UPDATE employees SET qr_code = CONCAT('GIAT-EMP-', id, '-', REPLACE(UUID(), '-', '')) WHERE qr_code IS NULL OR qr_code = ''");
     await connection.query('ALTER TABLE employees MODIFY qr_code VARCHAR(120) NOT NULL');
     console.log('✅ Tabel "employees" siap.');
@@ -58,10 +62,35 @@ async function initDatabase() {
       CREATE TABLE IF NOT EXISTS locations (
         id INT PRIMARY KEY AUTO_INCREMENT,
         name VARCHAR(100) NOT NULL UNIQUE,
+        address TEXT,
+        place_id VARCHAR(255),
+        latitude DECIMAL(10, 7),
+        longitude DECIMAL(10, 7),
+        radius_meter INT DEFAULT 100,
+        max_accuracy_meter INT DEFAULT 50,
+        is_active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+    await addColumnIfMissing(connection, 'locations', 'address', 'TEXT');
+    await addColumnIfMissing(connection, 'locations', 'place_id', 'VARCHAR(255)');
+    await addColumnIfMissing(connection, 'locations', 'latitude', 'DECIMAL(10, 7)');
+    await addColumnIfMissing(connection, 'locations', 'longitude', 'DECIMAL(10, 7)');
+    await addColumnIfMissing(connection, 'locations', 'radius_meter', 'INT DEFAULT 100');
+    await addColumnIfMissing(connection, 'locations', 'max_accuracy_meter', 'INT DEFAULT 50');
+    await addColumnIfMissing(connection, 'locations', 'is_active', 'BOOLEAN DEFAULT TRUE');
     console.log('✅ Tabel "locations" siap.');
+
+    // Tabel employee_locations (pivot)
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS employee_locations (
+        employee_id INT NOT NULL,
+        location_id INT NOT NULL,
+        is_primary BOOLEAN DEFAULT FALSE,
+        PRIMARY KEY (employee_id, location_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    console.log('✅ Tabel "employee_locations" siap.');
 
     // Tabel shifts
     await connection.query(`
@@ -126,10 +155,16 @@ async function initDatabase() {
     await addColumnIfMissing(connection, 'attendance', 'check_in_photo_url', 'TEXT');
     await addColumnIfMissing(connection, 'attendance', 'check_in_latitude', 'DECIMAL(10, 7) DEFAULT NULL');
     await addColumnIfMissing(connection, 'attendance', 'check_in_longitude', 'DECIMAL(10, 7) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_in_location_id', 'INT DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_in_accuracy', 'DECIMAL(10, 2) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_in_distance', 'DECIMAL(10, 2) DEFAULT NULL');
     await addColumnIfMissing(connection, 'attendance', 'check_out_photo_file_id', 'VARCHAR(120) DEFAULT NULL');
     await addColumnIfMissing(connection, 'attendance', 'check_out_photo_url', 'TEXT');
     await addColumnIfMissing(connection, 'attendance', 'check_out_latitude', 'DECIMAL(10, 7) DEFAULT NULL');
     await addColumnIfMissing(connection, 'attendance', 'check_out_longitude', 'DECIMAL(10, 7) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_out_location_id', 'INT DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_out_accuracy', 'DECIMAL(10, 2) DEFAULT NULL');
+    await addColumnIfMissing(connection, 'attendance', 'check_out_distance', 'DECIMAL(10, 2) DEFAULT NULL');
     console.log('✅ Tabel "attendance" siap.');
 
     // Tabel admin_config
@@ -152,11 +187,14 @@ async function initDatabase() {
         "INSERT INTO app_settings (`key`, value) VALUES ('barcode_content', 'KOPERASI GIAT')"
       );
       await connection.query(
-        "INSERT INTO app_settings (`key`, value) VALUES ('late_threshold_minutes', '6')"
+        "INSERT INTO app_settings (`key`, value) VALUES ('late_threshold_minutes', '5')"
       );
       console.log('✅ Default app_settings ditambahkan.');
     }
 
+    await connection.query(
+      "INSERT INTO app_settings (`key`, value) VALUES ('late_threshold_minutes', '5') ON DUPLICATE KEY UPDATE value = '5'"
+    );
     await connection.query(
       "INSERT IGNORE INTO app_settings (`key`, value) VALUES ('attendance_cleanup_enabled', 'false')"
     );

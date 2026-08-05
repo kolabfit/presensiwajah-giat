@@ -1,7 +1,10 @@
 const express = require('express');
 const router = express.Router();
+const { Readable } = require('stream');
 const pool = require('../db/connection');
 const { uploadDataUrl, deleteAsset, CDN_BASE_URL, isLocalAssetId, localAssetUrl } = require('../services/cdn');
+const { extractDescriptor, findBestMatch } = require('../services/faceRecognition');
+const { validateGeofence } = require('../utils/geofence');
 
 function photoViewUrl(fileId) {
   return fileId ? `${CDN_BASE_URL}/api/bridge/view/${fileId}` : '';
@@ -63,6 +66,121 @@ function inferImageMime(buffer, fallbackType) {
   return 'image/jpeg';
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchCdnPhotoWithRetry(fileId, signal, attempts = 5) {
+  let lastResponse = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const response = await fetch(photoViewUrl(fileId), {
+      redirect: 'follow',
+      signal
+    });
+
+    if (response.ok) return response;
+    lastResponse = response;
+
+    if (![404, 408, 425, 429, 500, 502, 503, 504].includes(response.status)) {
+      return response;
+    }
+
+    await response.body?.cancel().catch(() => {});
+    if (attempt < attempts) await sleep(450 * attempt);
+  }
+
+  return lastResponse;
+}
+
+async function streamCdnPhoto(req, res, fileId, filenamePrefix = 'presensi') {
+  const controller = new AbortController();
+  req.on('close', () => controller.abort());
+
+  try {
+    const upstream = await fetchCdnPhotoWithRetry(fileId, controller.signal);
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).send('Foto tidak ditemukan');
+    }
+
+    const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+    const contentLength = upstream.headers.get('content-length');
+
+    res.setHeader('Content-Type', contentType.startsWith('image/') ? contentType : 'image/jpeg');
+    res.setHeader('Content-Disposition', `inline; filename="${filenamePrefix}-${fileId}"`);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+
+    if (!upstream.body) {
+      const arrayBuffer = await upstream.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      res.setHeader('Content-Type', inferImageMime(buffer, contentType));
+      return res.send(buffer);
+    }
+
+    const stream = Readable.fromWeb(upstream.body);
+    stream.on('error', (error) => {
+      if (error.name !== 'AbortError') {
+        console.error('Error streaming attendance photo:', error.message);
+      }
+      if (!res.destroyed) res.destroy(error);
+    });
+    return stream.pipe(res);
+  } catch (error) {
+    if (error.name === 'AbortError' || req.destroyed) return;
+    console.error('Error proxying attendance photo:', error);
+    if (!res.headersSent) return res.status(500).send('Gagal memuat foto');
+    return res.end();
+  }
+}
+
+async function uploadAttendancePhoto(photoDataUrl, action, employeeName) {
+  const safeAction = action === 'pulang' ? 'pulang' : 'masuk';
+  const fileName = `presensi-${safeAction}-${employeeName}-${Date.now()}.jpg`;
+  return await uploadDataUrl(photoDataUrl, fileName, {
+    requireVerified: true,
+    verifyAttempts: 20
+  });
+}
+
+async function recognizeEmployeeFromPhoto(photoDataUrl) {
+  if (!photoDataUrl) {
+    const error = new Error('Foto wajah wajib diambil untuk presensi.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const queryDescriptor = await extractDescriptor(photoDataUrl);
+  if (!queryDescriptor) {
+    const error = new Error('Wajah tidak terdeteksi. Pastikan wajah terlihat jelas di kamera.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const [employees] = await pool.query(`
+    SELECT id, name, status, photo_file_id, photo_url, face_descriptor
+    FROM employees
+    WHERE status = 'AKTIF' AND face_registered = TRUE AND face_descriptor IS NOT NULL
+  `);
+
+  if (employees.length === 0) {
+    const error = new Error('Belum ada pegawai aktif yang terdaftar wajahnya.');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const match = findBestMatch(queryDescriptor, employees);
+  if (!match.matched) {
+    const error = new Error('Wajah tidak cocok dengan data pegawai terdaftar.');
+    error.statusCode = 401;
+    error.distance = Number.isFinite(match.distance) ? match.distance : null;
+    throw error;
+  }
+
+  return match;
+}
+
 /**
  * GET /api/attendance
  * Ambil semua riwayat presensi
@@ -73,11 +191,10 @@ router.get('/', async (req, res) => {
       'SELECT * FROM attendance ORDER BY date DESC, timestamp DESC'
     );
 
-    // Format response sesuai dengan yang diharapkan frontend
     const data = rows.map(row => ({
       Id: row.id,
       Timestamp: row.timestamp,
-      Date: row.date || '',  // sudah string YYYY-MM-DD karena dateStrings: true
+      Date: row.date || '',
       Name: row.name,
       Location: row.location,
       Shift: row.shift,
@@ -104,34 +221,13 @@ router.get('/', async (req, res) => {
 
 /**
  * GET /api/attendance/photos/view/:fileId
- * Proxy gambar CDN supaya browser selalu menampilkan inline, bukan download.
  */
 router.get('/photos/view/:fileId', async (req, res) => {
-  try {
-    const { fileId } = req.params;
-    const upstream = await fetch(photoViewUrl(fileId), { redirect: 'follow' });
-
-    if (!upstream.ok) {
-      return res.status(upstream.status).send('Foto tidak ditemukan');
-    }
-
-    const arrayBuffer = await upstream.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const contentType = inferImageMime(buffer, upstream.headers.get('content-type'));
-
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `inline; filename="presensi-${fileId}"`);
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.send(buffer);
-  } catch (error) {
-    console.error('Error proxying attendance photo:', error);
-    res.status(500).send('Gagal memuat foto');
-  }
+  return streamCdnPhoto(req, res, req.params.fileId, 'presensi');
 });
 
 /**
  * GET /api/attendance/photos
- * Ambil daftar foto bukti presensi untuk admin.
  */
 router.get('/photos', async (req, res) => {
   try {
@@ -187,8 +283,38 @@ router.get('/photos', async (req, res) => {
 });
 
 /**
+ * POST /api/attendance/recognize
+ */
+router.post('/recognize', async (req, res) => {
+  try {
+    const { photoDataUrl } = req.body;
+    const recognition = await recognizeEmployeeFromPhoto(photoDataUrl);
+
+    res.json({
+      success: true,
+      employee: {
+        name: recognition.employee.name,
+        photo_url: recognition.employee.photo_file_id
+          ? proxiedPhotoUrl(req, recognition.employee.photo_file_id)
+          : normalizePhotoUrl(req, recognition.employee.photo_url, recognition.employee.photo_file_id)
+      },
+      face: {
+        distance: Number(recognition.distance.toFixed(4))
+      }
+    });
+  } catch (error) {
+    console.error('Error recognizing attendance face:', error);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Wajah belum berhasil dikenali. Silakan coba lagi.',
+      distance: error.distance
+    });
+  }
+});
+
+/**
  * POST /api/attendance
- * Simpan presensi (masuk atau pulang)
+ * Simpan presensi (masuk atau pulang) dengan validasi Geofence.
  */
 router.post('/', async (req, res) => {
   try {
@@ -199,57 +325,138 @@ router.post('/', async (req, res) => {
     }
 
     const todayStr = data.Date;
-    let uploadedPhoto = null;
-    if (data.PhotoDataUrl) {
-      const action = data.TimeOut ? 'pulang' : 'masuk';
-      uploadedPhoto = await uploadDataUrl(data.PhotoDataUrl, `presensi-${action}-${Date.now()}.jpg`);
+    const recognition = await recognizeEmployeeFromPhoto(data.PhotoDataUrl);
+    const recognizedName = recognition.employee.name;
+    const recognizedId = recognition.employee.id;
+    data.Name = recognizedName;
+
+    const action = data.TimeOut ? 'pulang' : 'masuk';
+    
+    // Default fallback if payload is missing Accuracy
+    const Latitude = data.Latitude || null;
+    const Longitude = data.Longitude || null;
+    const Accuracy = data.Accuracy || null;
+
+    if (!Latitude || !Longitude) {
+       return res.status(400).json({ success: false, message: 'Sistem tidak dapat membaca koordinat GPS Anda.' });
     }
 
-    // Cari record yang sudah ada untuk nama & tanggal yang sama
+    // Ambil lokasi penugasan pegawai
+    const [assignedLocations] = await pool.query(`
+      SELECT l.* 
+      FROM employee_locations el
+      JOIN locations l ON el.location_id = l.id
+      WHERE el.employee_id = ? AND l.is_active = TRUE
+    `, [recognizedId]);
+
+    if (assignedLocations.length === 0) {
+      return res.json({ success: false, message: 'Lokasi kerja Anda belum ditetapkan oleh admin.' });
+    }
+
+    // Cari record yang sudah ada
     const [existing] = await pool.query(
-      'SELECT id, time_in, time_out FROM attendance WHERE name = ? AND date = ?',
-      [data.Name, todayStr]
+      'SELECT id, time_in, time_out, check_in_location_id FROM attendance WHERE name = ? AND date = ? ORDER BY id DESC',
+      [recognizedName, todayStr]
     );
 
-    // --- LOGIKA PULANG (UPDATE TIME_OUT) ---
+    let nearestValidLocation = null;
+    let geofenceDistance = null;
+
+    // Logika Check-Out: Wajib di lokasi yang sama dengan saat Check-In jika check_in_location_id tercatat.
+    if (data.TimeOut && existing.length > 0 && existing[0].check_in_location_id) {
+      const checkInLocId = existing[0].check_in_location_id;
+      const assignedMatch = assignedLocations.find(l => l.id === checkInLocId);
+      if (!assignedMatch) {
+        return res.json({ success: false, message: 'Lokasi check-in Anda tidak tersedia lagi di daftar penugasan.' });
+      }
+      
+      const result = validateGeofence(Latitude, Longitude, Accuracy, assignedMatch);
+      if (!result.valid) {
+        return res.json({ success: false, message: `Presensi pulang harus di lokasi yang sama saat masuk. ${result.reason}` });
+      }
+      nearestValidLocation = assignedMatch;
+      geofenceDistance = result.distance;
+    } else {
+      // Logika Check-In (atau check-out legacy)
+      for (const loc of assignedLocations) {
+        const result = validateGeofence(Latitude, Longitude, Accuracy, loc);
+        if (result.valid) {
+          nearestValidLocation = loc;
+          geofenceDistance = result.distance;
+          break; // Cukup temukan 1 yang valid
+        }
+      }
+
+      if (!nearestValidLocation) {
+        let minDist = Infinity;
+        let lastReason = 'Anda berada di luar jangkauan dari semua lokasi kerja Anda.';
+        for (const loc of assignedLocations) {
+          const result = validateGeofence(Latitude, Longitude, Accuracy, loc);
+          if (result.distance !== null && result.distance < minDist) {
+            minDist = result.distance;
+            lastReason = result.reason;
+          }
+        }
+        return res.json({ success: false, message: lastReason });
+      }
+    }
+
+    data.Location = nearestValidLocation.name; // Timpa dengan nama yang tervalidasi
+    const locationId = nearestValidLocation.id;
+
+    // --- PROSES SIMPAN ABSEN ---
     if (data.TimeOut) {
       if (existing.length > 0) {
+        const currentRecord = existing[0];
+        if (currentRecord.time_out && String(currentRecord.time_out).trim()) {
+          return res.json({
+            success: false,
+            message: 'Anda sudah melakukan Presensi Pulang hari ini'
+          });
+        }
+
+        const uploadedPhoto = await uploadAttendancePhoto(data.PhotoDataUrl, action, recognizedName);
         await pool.query(
           `UPDATE attendance
            SET time_out = ?, check_out_photo_file_id = ?, check_out_photo_url = ?,
-               check_out_latitude = ?, check_out_longitude = ?
+               check_out_latitude = ?, check_out_longitude = ?, check_out_location_id = ?, check_out_accuracy = ?, check_out_distance = ?
            WHERE id = ?`,
           [
             data.TimeOut,
             uploadedPhoto?.fileId || null,
             uploadedPhoto?.url || null,
-            data.Latitude || null,
-            data.Longitude || null,
-            existing[0].id
+            Latitude,
+            Longitude,
+            locationId,
+            Accuracy,
+            geofenceDistance,
+            currentRecord.id
           ]
         );
-        return res.json({ success: true, message: 'Presensi Pulang Berhasil' });
+        return res.json({
+          success: true,
+          message: 'Presensi Pulang Berhasil',
+          employee: { name: recognizedName },
+          face: { distance: Number(recognition.distance.toFixed(4)) }
+        });
       } else {
         return res.json({ success: false, message: 'Data Masuk tidak ditemukan untuk hari ini' });
       }
-    }
-
-    // --- LOGIKA MASUK (INSERT NEW ROW) ---
-    else {
-      // Validasi: Jangan izinkan double check-in di hari yang sama
+    } else {
       if (existing.length > 0) {
         return res.json({ success: false, message: 'Anda sudah melakukan Presensi Masuk hari ini' });
       }
 
+      const uploadedPhoto = await uploadAttendancePhoto(data.PhotoDataUrl, action, recognizedName);
       await pool.query(
         `INSERT INTO attendance (
           date, name, location, shift, time_in, time_out, status, note,
-          check_in_photo_file_id, check_in_photo_url, check_in_latitude, check_in_longitude
+          check_in_photo_file_id, check_in_photo_url, check_in_latitude, check_in_longitude, check_in_location_id, check_in_accuracy, check_in_distance
         )
-         VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           data.Date,
-          data.Name,
+          recognizedName,
           data.Location,
           data.Shift,
           data.TimeIn,
@@ -257,31 +464,40 @@ router.post('/', async (req, res) => {
           data.Note || '',
           uploadedPhoto?.fileId || null,
           uploadedPhoto?.url || null,
-          data.Latitude || null,
-          data.Longitude || null
+          Latitude,
+          Longitude,
+          locationId,
+          Accuracy,
+          geofenceDistance
         ]
       );
 
-      return res.json({ success: true, message: 'Presensi Masuk Berhasil' });
+      return res.json({
+        success: true,
+        message: 'Presensi Masuk Berhasil',
+        employee: { name: recognizedName },
+        face: { distance: Number(recognition.distance.toFixed(4)) }
+      });
     }
   } catch (error) {
     console.error('Error saving attendance:', error);
     if (error.isCdnUploadError) {
-      return res.status(503).json({
+      return res.status(424).json({
         success: false,
-        message: error.message
+        message: error.message,
+        attempts: error.attempts
       });
     }
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Presensi belum berhasil disimpan. Silakan coba lagi atau hubungi admin jika masih gagal.'
+      message: error.message || 'Presensi belum berhasil disimpan. Silakan coba lagi atau hubungi admin jika masih gagal.',
+      distance: error.distance
     });
   }
 });
 
 /**
  * DELETE /api/attendance/photos/:attendanceId/:type
- * Hapus foto bukti presensi dari CDN dan kosongkan referensi DB.
  */
 router.delete('/photos/:attendanceId/:type', async (req, res) => {
   try {
@@ -318,12 +534,8 @@ router.delete('/photos/:attendanceId/:type', async (req, res) => {
   }
 });
 
-/**
- * Helper: Format date dari MySQL ke yyyy-MM-dd
- */
 function formatDate(date) {
   if (date instanceof Date) {
-    // Pakai local timezone, bukan UTC
     const y = date.getFullYear();
     const m = String(date.getMonth() + 1).padStart(2, '0');
     const d = String(date.getDate()).padStart(2, '0');

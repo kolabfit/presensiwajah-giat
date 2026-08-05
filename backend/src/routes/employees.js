@@ -1,8 +1,11 @@
 const express = require('express');
 const crypto = require('crypto');
+const { Readable } = require('stream');
 const router = express.Router();
 const pool = require('../db/connection');
+const { authMiddleware } = require('./admin');
 const { uploadDataUrl, deleteAsset, CDN_BASE_URL, isLocalAssetId, localAssetUrl } = require('../services/cdn');
+const { extractDescriptor } = require('../services/faceRecognition');
 
 function createEmployeeQrCode() {
   return `GIAT-EMP-${crypto.randomUUID()}`;
@@ -62,8 +65,57 @@ function extractAssetIdFromUrl(url) {
 function normalizeEmployeeRow(req, row) {
   return {
     ...row,
+    face_registered: !!row.face_registered || Boolean(row.photo_file_id || row.photo_url),
     photo_url: normalizeEmployeePhotoUrl(req, row.photo_url, row.photo_file_id)
   };
+}
+
+async function extractRequiredFaceDescriptor(photoDataUrl) {
+  const descriptor = await extractDescriptor(photoDataUrl);
+  if (!descriptor) {
+    const error = new Error('Wajah tidak terdeteksi pada foto pegawai. Pastikan wajah terlihat jelas, menghadap kamera, dan pencahayaan cukup.');
+    error.statusCode = 400;
+    throw error;
+  }
+  return descriptor;
+}
+
+async function insertEmployeeWithoutFace(name, status, qrCode) {
+  try {
+    await pool.query(
+      `INSERT INTO employees (name, status, qr_code, face_registered)
+       VALUES (?, ?, ?, FALSE)`,
+      [name, status, qrCode]
+    );
+  } catch (error) {
+    if (error.code !== 'ER_NO_DEFAULT_FOR_FIELD' || !String(error.sqlMessage || '').includes("'id'")) {
+      throw error;
+    }
+    await pool.query(
+      `INSERT INTO employees (id, name, status, qr_code, face_registered)
+       VALUES (?, ?, ?, ?, FALSE)`,
+      [crypto.randomUUID(), name, status, qrCode]
+    );
+  }
+}
+
+async function insertEmployeeWithFace(name, status, qrCode, photo, faceDescriptor) {
+  try {
+    await pool.query(
+      `INSERT INTO employees (name, status, qr_code, photo_file_id, photo_url, face_registered, face_descriptor)
+       VALUES (?, ?, ?, ?, ?, TRUE, ?)`,
+      [name, status, qrCode, photo.fileId, photo.url, JSON.stringify(faceDescriptor)]
+    );
+  } catch (error) {
+    if (error.code !== 'ER_NO_DEFAULT_FOR_FIELD' || !String(error.sqlMessage || '').includes("'id'")) {
+      throw error;
+    }
+    await pool.query(
+      `INSERT INTO employees (id, name, status, qr_code, photo_file_id, photo_url, face_registered, face_descriptor)
+       VALUES (?, ?, ?, ?, ?, ?, TRUE, ?)`,
+      [crypto.randomUUID(), name, status, qrCode, photo.fileId, photo.url, JSON.stringify(faceDescriptor)]
+    );
+  }
 }
 
 function inferImageMime(buffer, fallbackType) {
@@ -75,12 +127,63 @@ function inferImageMime(buffer, fallbackType) {
   return 'image/jpeg';
 }
 
+async function streamCdnPhoto(req, res, fileId, filenamePrefix = 'pegawai') {
+  const controller = new AbortController();
+  req.on('close', () => controller.abort());
+
+  try {
+    const upstream = await fetch(cdnPhotoUrl(fileId), {
+      redirect: 'follow',
+      signal: controller.signal
+    });
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).send('Foto pegawai tidak ditemukan');
+    }
+
+    const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+    const contentLength = upstream.headers.get('content-length');
+
+    res.setHeader('Content-Type', contentType.startsWith('image/') ? contentType : 'image/jpeg');
+    res.setHeader('Content-Disposition', `inline; filename="${filenamePrefix}-${fileId}"`);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+
+    if (!upstream.body) {
+      const arrayBuffer = await upstream.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      res.setHeader('Content-Type', inferImageMime(buffer, contentType));
+      return res.send(buffer);
+    }
+
+    const stream = Readable.fromWeb(upstream.body);
+    stream.on('error', (error) => {
+      if (error.name !== 'AbortError') {
+        console.error('Error streaming employee photo:', error.message);
+      }
+      if (!res.destroyed) res.destroy(error);
+    });
+    return stream.pipe(res);
+  } catch (error) {
+    if (error.name === 'AbortError' || req.destroyed) return;
+    console.error('Error proxying employee photo:', error);
+    if (!res.headersSent) return res.status(500).send('Gagal memuat foto pegawai');
+    return res.end();
+  }
+}
+
 /**
  * GET /api/employees
  */
 router.get('/', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT name, status, qr_code, qr_file_id, qr_url, photo_file_id, photo_url FROM employees ORDER BY name ASC');
+    let rows;
+    try {
+      [rows] = await pool.query('SELECT id, name, status, qr_code, qr_file_id, qr_url, photo_file_id, photo_url, face_registered FROM employees ORDER BY name ASC');
+    } catch (error) {
+      if (error.code !== 'ER_BAD_FIELD_ERROR') throw error;
+      [rows] = await pool.query('SELECT id, name, status, qr_code, qr_file_id, qr_url, photo_file_id, photo_url FROM employees ORDER BY name ASC');
+    }
     res.json(rows.map(row => normalizeEmployeeRow(req, row)));
   } catch (error) {
     console.error('Error fetching employees:', error);
@@ -93,26 +196,7 @@ router.get('/', async (req, res) => {
  * Proxy foto pegawai supaya browser menampilkan gambar, bukan download.
  */
 router.get('/photos/view/:fileId', async (req, res) => {
-  try {
-    const { fileId } = req.params;
-    const upstream = await fetch(cdnPhotoUrl(fileId), { redirect: 'follow' });
-
-    if (!upstream.ok) {
-      return res.status(upstream.status).send('Foto pegawai tidak ditemukan');
-    }
-
-    const arrayBuffer = await upstream.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const contentType = inferImageMime(buffer, upstream.headers.get('content-type'));
-
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `inline; filename="pegawai-${fileId}"`);
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.send(buffer);
-  } catch (error) {
-    console.error('Error proxying employee photo:', error);
-    res.status(500).send('Gagal memuat foto pegawai');
-  }
+  return streamCdnPhoto(req, res, req.params.fileId, 'pegawai');
 });
 
 /**
@@ -170,6 +254,9 @@ router.post('/:name/qr-image', async (req, res) => {
     res.json({ success: true, message: 'QR berhasil disimpan ke CDN', qr_file_id: qrAsset.fileId, qr_url: qrAsset.url });
   } catch (error) {
     console.error('Error saving QR image:', error);
+    if (error.isCdnUploadError) {
+      return res.status(503).json({ success: false, message: error.message, attempts: error.attempts });
+    }
     res.status(500).json({ success: false, message: error.message || 'Internal server error' });
   }
 });
@@ -185,23 +272,28 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Nama wajib diisi' });
     }
 
-    let photo = { fileId: null, url: null };
+    const qrCode = createEmployeeQrCode();
+    const employeeName = name.toUpperCase();
+    const employeeStatus = status || 'AKTIF';
+
     if (photoDataUrl) {
-      photo = await uploadDataUrl(photoDataUrl, `pegawai-${Date.now()}.jpg`);
+      const faceDescriptor = await extractRequiredFaceDescriptor(photoDataUrl);
+      const photo = await uploadDataUrl(photoDataUrl, `pegawai-${Date.now()}.jpg`);
+      await insertEmployeeWithFace(employeeName, employeeStatus, qrCode, photo, faceDescriptor);
+      return res.json({ success: true, message: 'Pegawai berhasil ditambahkan dan wajah terdaftar', qr_code: qrCode, face_registered: true });
     }
 
-    const qrCode = createEmployeeQrCode();
-    await pool.query(
-      'INSERT INTO employees (name, status, qr_code, photo_file_id, photo_url) VALUES (?, ?, ?, ?, ?)',
-      [name.toUpperCase(), status || 'AKTIF', qrCode, photo.fileId, photo.url]
-    );
-    res.json({ success: true, message: 'Pegawai berhasil ditambahkan', qr_code: qrCode });
+    await insertEmployeeWithoutFace(employeeName, employeeStatus, qrCode);
+    res.json({ success: true, message: 'Pegawai berhasil ditambahkan. Wajah bisa diregistrasi dari halaman user.', qr_code: qrCode, face_registered: false });
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(400).json({ success: false, message: 'Nama pegawai sudah ada' });
     }
     console.error('Error adding employee:', error);
-    res.status(500).json({ success: false, message: 'Internal server error' });
+    if (error.isCdnUploadError) {
+      return res.status(503).json({ success: false, message: error.message, attempts: error.attempts });
+    }
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' });
   }
 });
 
@@ -225,13 +317,19 @@ router.put('/:name', async (req, res) => {
     const nextStatus = status || existing[0].status;
 
     if (photoDataUrl) {
+      const faceDescriptor = await extractRequiredFaceDescriptor(photoDataUrl);
       const photo = await uploadDataUrl(photoDataUrl, `pegawai-${Date.now()}.jpg`);
-      await pool.query('UPDATE employees SET status = ?, photo_file_id = ?, photo_url = ? WHERE name = ?', [nextStatus, photo.fileId, photo.url, name]);
+      await pool.query(
+        `UPDATE employees
+         SET status = ?, photo_file_id = ?, photo_url = ?, face_registered = TRUE, face_descriptor = ?
+         WHERE name = ?`,
+        [nextStatus, photo.fileId, photo.url, JSON.stringify(faceDescriptor), name]
+      );
       const oldPhotoAssetId = existing[0]?.photo_file_id || extractAssetIdFromUrl(existing[0]?.photo_url);
       if (oldPhotoAssetId) {
         deleteAsset(oldPhotoAssetId).catch(err => console.error('Error deleting old employee photo:', err.message));
       }
-      return res.json({ success: true, message: 'Foto pegawai berhasil diperbarui', photo_file_id: photo.fileId, photo_url: photo.url });
+      return res.json({ success: true, message: 'Foto wajah pegawai berhasil diperbarui', photo_file_id: photo.fileId, photo_url: photo.url, face_registered: true });
     } else {
       await pool.query('UPDATE employees SET status = ? WHERE name = ?', [nextStatus, name]);
     }
@@ -239,9 +337,9 @@ router.put('/:name', async (req, res) => {
   } catch (error) {
     console.error('Error updating employee:', error);
     if (error.isCdnUploadError) {
-      return res.status(503).json({ success: false, message: error.message });
+      return res.status(503).json({ success: false, message: error.message, attempts: error.attempts });
     }
-    res.status(500).json({ success: false, message: 'Foto pegawai belum berhasil diperbarui. Silakan coba lagi.' });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Foto pegawai belum berhasil diperbarui. Silakan coba lagi.' });
   }
 });
 
@@ -274,6 +372,66 @@ router.delete('/:name', async (req, res) => {
   } catch (error) {
     console.error('Error deleting employee:', error);
     res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /api/employees/:id/locations
+ * Mengambil daftar lokasi yang ditugaskan kepada pegawai (khusus admin).
+ */
+router.get('/:id/locations', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await pool.query(
+      `SELECT el.location_id, el.is_primary, l.name, l.address, l.is_active 
+       FROM employee_locations el
+       JOIN locations l ON el.location_id = l.id
+       WHERE el.employee_id = ?`,
+      [id]
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching employee locations:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+/**
+ * PUT /api/employees/:id/locations
+ * Memperbarui daftar lokasi yang ditugaskan kepada pegawai (khusus admin).
+ */
+router.put('/:id/locations', authMiddleware, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const { id } = req.params;
+    const { locations } = req.body; // Array of { location_id, is_primary }
+    
+    if (!Array.isArray(locations)) {
+      return res.status(400).json({ success: false, message: 'Format data lokasi tidak valid' });
+    }
+
+    await connection.beginTransaction();
+
+    // Hapus semua penugasan lokasi saat ini
+    await connection.query('DELETE FROM employee_locations WHERE employee_id = ?', [id]);
+
+    // Insert penugasan lokasi baru
+    if (locations.length > 0) {
+      const values = locations.map(loc => [id, loc.location_id, loc.is_primary ? 1 : 0]);
+      await connection.query(
+        'INSERT INTO employee_locations (employee_id, location_id, is_primary) VALUES ?',
+        [values]
+      );
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: 'Lokasi penugasan pegawai berhasil diperbarui' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating employee locations:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  } finally {
+    connection.release();
   }
 });
 

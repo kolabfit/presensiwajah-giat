@@ -27,3 +27,43 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #94A3B8;
 }
+
+@keyframes face-scan-line {
+  0% {
+    transform: translateY(-42%);
+    opacity: 0.15;
+  }
+  18% {
+    opacity: 0.95;
+  }
+  50% {
+    transform: translateY(42%);
+    opacity: 0.95;
+  }
+  82% {
+    opacity: 0.95;
+  }
+  100% {
+    transform: translateY(-42%);
+    opacity: 0.15;
+  }
+}
+
+@keyframes camera-breathe {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.03);
+    opacity: 0.9;
+  }
+}
+
+.face-scan-line {
+  animation: face-scan-line 2.4s ease-in-out infinite;
+}
+
+.camera-guide-breathe {
+  animation: camera-breathe 2.8s ease-in-out infinite;
+}
