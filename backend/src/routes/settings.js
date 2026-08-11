@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db/connection');
 const { runAttendanceCleanup } = require('../services/attendanceCleanup');
+const { logAudit } = require('../utils/auditLogger');
 
 /**
  * GET /api/settings
@@ -35,6 +36,7 @@ router.put('/', async (req, res) => {
         [key, value, value]
       );
     }
+    await logAudit('Admin/System', 'SYSTEM', 'UPDATE', 'SETTINGS', 'System Settings', null, updates, req);
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating settings:', error);
@@ -50,6 +52,7 @@ router.post('/attendance-cleanup/run', async (req, res) => {
   try {
     const { retentionDays } = req.body || {};
     const result = await runAttendanceCleanup({ force: true, retentionDays });
+    await logAudit('Admin/System', 'SYSTEM', 'CLEANUP', 'ATTENDANCE', 'Data Absensi Lama', null, result, req);
     res.json({ success: true, ...result });
   } catch (error) {
     console.error('Error running attendance cleanup:', error);

@@ -1,4 +1,4 @@
-import { AttendanceData, AdminConfig, Employee, AppSettings, AttendancePhoto, Location, EmployeeLocation } from '../types';
+import { AttendanceData, AdminConfig, Employee, AppSettings, AttendancePhoto, Location, EmployeeLocation, Ticket, TicketMessage, AuditLog, SystemHealth } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5045/api';
 const API_RETRY_ATTEMPTS = 3;
@@ -12,15 +12,37 @@ function sleep(ms: number) {
 }
 
 function shouldRetryResponse(status: number) {
+  if (status === 503) return false;
   return status === 408 || status === 429 || status >= 500;
 }
 
 async function fetchWithRetry(input: RequestInfo | URL, init?: RequestInit, attempts = API_RETRY_ATTEMPTS) {
   let lastError: unknown = null;
 
+  const modifiedInit = init ? { ...init } : {};
+  if (authToken) {
+    const headers = new Headers(modifiedInit.headers);
+    headers.set('Authorization', `Bearer ${authToken}`);
+    modifiedInit.headers = headers;
+  }
+
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await window.fetch(input, init);
+      const response = await window.fetch(input, modifiedInit);
+      
+      if (response.status === 503) {
+        const clone = response.clone();
+        try {
+          const data = await clone.json();
+          if (data.isMaintenance) {
+            window.dispatchEvent(new Event('maintenance-mode'));
+            throw new Error(data.message || 'Sistem sedang dalam perbaikan rutin (Maintenance Mode).');
+          }
+        } catch (e) {
+          if (e instanceof Error && e.message.includes('Maintenance Mode')) throw e;
+        }
+      }
+
       if (!shouldRetryResponse(response.status) || attempt === attempts) {
         return response;
       }
@@ -46,6 +68,14 @@ function getAuthHeaders(): Record<string, string> {
   return headers;
 }
 
+export const getImageUrl = (url?: string | null) => {
+  if (!url) return '';
+  if (url.startsWith('/')) {
+    return `${API_URL.replace('/api', '')}${url}`;
+  }
+  return url;
+};
+
 export const api = {
   // === Admin Auth ===
   async login(id: string, password: string): Promise<{ success: boolean; message?: string; token?: string }> {
@@ -59,6 +89,7 @@ export const api = {
       if (data.success && data.token) {
         authToken = data.token;
         localStorage.setItem('admin_token', data.token);
+        if (data.role) localStorage.setItem('admin_role', data.role);
       }
       return data;
     } catch (e) {
@@ -78,16 +109,22 @@ export const api = {
     }
     authToken = null;
     localStorage.removeItem('admin_token');
+    localStorage.removeItem('admin_role');
   },
 
-  async verifyToken(): Promise<boolean> {
+  async verifyToken(): Promise<{ success: boolean; role?: string }> {
     try {
       const res = await fetchWithRetry(`${API_URL}/admin/verify`, {
         headers: getAuthHeaders()
       });
-      return res.ok;
+      if (res.ok) {
+        const data = await res.json();
+        if (data.role) localStorage.setItem('admin_role', data.role);
+        return { success: true, role: data.role };
+      }
+      return { success: false };
     } catch (e) {
-      return false;
+      return { success: false };
     }
   },
 
@@ -418,5 +455,164 @@ export const api = {
       body: JSON.stringify({ retentionDays })
     });
     return await res.json();
+  },
+
+  // === Tickets (Public) ===
+  async createTicket(data: Partial<Ticket> & { screenshot_data_url?: string }) {
+    const res = await fetchWithRetry(`${API_URL}/tickets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    return await res.json();
+  },
+
+  async getTicketStatus(ticketNumber: string, reporterName: string) {
+    const res = await fetchWithRetry(`${API_URL}/tickets/status/${encodeURIComponent(ticketNumber)}?reporter_name=${encodeURIComponent(reporterName)}`);
+    return await res.json();
+  },
+
+  async replyTicketPublic(ticketNumber: string, data: { reporter_name: string; message: string; attachment_data_url?: string }) {
+    const res = await fetchWithRetry(`${API_URL}/tickets/status/${encodeURIComponent(ticketNumber)}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    return await res.json();
+  },
+
+  // === Tickets (Admin) ===
+  async getAdminTickets(filters?: { status?: string; priority?: string; search?: string }) {
+    const params = new URLSearchParams();
+    if (filters?.status) params.append('status', filters.status);
+    if (filters?.priority) params.append('priority', filters.priority);
+    if (filters?.search) params.append('search', filters.search);
+    
+    const res = await fetchWithRetry(`${API_URL}/tickets/admin?${params.toString()}`, {
+      headers: getAuthHeaders()
+    });
+    return await res.json();
+  },
+
+  async getAdminTicketDetail(id: number) {
+    const res = await fetchWithRetry(`${API_URL}/tickets/admin/${id}`, {
+      headers: getAuthHeaders()
+    });
+    return await res.json();
+  },
+
+  async updateAdminTicketStatus(id: number, status?: string, priority?: string) {
+    const res = await fetchWithRetry(`${API_URL}/tickets/admin/${id}/status`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ status, priority })
+    });
+    return await res.json();
+  },
+
+  async replyAdminTicket(id: number, data: { message: string; attachment_data_url?: string; new_status?: string }) {
+    const res = await fetchWithRetry(`${API_URL}/tickets/admin/${id}/reply`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data)
+    });
+    return await res.json();
+  },
+
+  // === Admin Accounts (Superadmin) ===
+  async getAdminAccounts() {
+    const res = await fetchWithRetry(`${API_URL}/admin/accounts`, {
+      headers: getAuthHeaders()
+    });
+    return await res.json();
+  },
+
+  async addAdminAccount(data: AdminConfig) {
+    const res = await fetchWithRetry(`${API_URL}/admin/accounts`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data)
+    });
+    return await res.json();
+  },
+
+  async updateAdminAccount(id: number | string, data: Partial<AdminConfig>) {
+    const res = await fetchWithRetry(`${API_URL}/admin/accounts/${id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data)
+    });
+    return await res.json();
+  },
+
+  async resetAdminPassword(id: number | string, password: string) {
+    const res = await fetchWithRetry(`${API_URL}/admin/accounts/${id}/reset-password`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ password })
+    });
+    return await res.json();
+  },
+
+  async deleteAdminAccount(id: number | string) {
+    const res = await fetchWithRetry(`${API_URL}/admin/accounts/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders()
+    });
+    return await res.json();
+  },
+
+  // === Audit & System (Superadmin) ===
+  async getAuditLogs(filters?: { module?: string; action?: string; search?: string }) {
+    const params = new URLSearchParams();
+    if (filters?.module) params.append('module', filters.module);
+    if (filters?.action) params.append('action', filters.action);
+    if (filters?.search) params.append('search', filters.search);
+
+    const res = await fetchWithRetry(`${API_URL}/audit?${params.toString()}`, {
+      headers: getAuthHeaders()
+    });
+    return await res.json();
+  },
+
+  async getSystemHealth() {
+    const res = await fetchWithRetry(`${API_URL}/system/health`, {
+      headers: getAuthHeaders()
+    });
+    return await res.json();
+  },
+
+  async triggerSystemBackup() {
+    const res = await fetchWithRetry(`${API_URL}/system/backup`, {
+      method: 'POST',
+      headers: getAuthHeaders()
+    });
+    
+    const contentType = res.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      return await res.json();
+    } else {
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      
+      const disposition = res.headers.get('content-disposition');
+      let filename = 'backup.sql';
+      if (disposition && disposition.indexOf('filename=') !== -1) {
+        const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(disposition);
+        if (matches != null && matches[1]) {
+          filename = matches[1].replace(/['"]/g, '');
+        }
+      }
+
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      
+      return { success: true, file: filename };
+    }
   }
 };

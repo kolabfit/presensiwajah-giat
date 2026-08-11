@@ -26,8 +26,13 @@ export interface AttendanceData {
 }
 
 export interface AdminConfig {
-  id: string;
-  password: string;
+  id?: number | string;
+  admin_id?: string;
+  password?: string;
+  role?: 'SUPERADMIN' | 'ADMIN';
+  is_active?: boolean;
+  last_login?: string;
+  created_at?: string;
 }
 
 export interface Employee {
@@ -80,4 +85,64 @@ export interface EmployeeLocation {
   name?: string;
   address?: string;
   is_active?: boolean;
+}
+
+export interface TicketMessage {
+  id: number;
+  sender_type: 'REPORTER' | 'SUPERADMIN';
+  sender_user_id?: string;
+  message: string;
+  attachment_file_id?: string;
+  attachment_url?: string;
+  created_at: string;
+}
+
+export interface Ticket {
+  id: number;
+  ticket_number: string;
+  employee_id?: number;
+  reporter_name: string;
+  category: string;
+  title: string;
+  description: string;
+  priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  status: 'NEW' | 'IN_PROGRESS' | 'WAITING_REPORTER' | 'RESOLVED' | 'DUPLICATE' | 'REJECTED';
+  screenshot_file_id?: string;
+  screenshot_url?: string;
+  browser?: string;
+  operating_system?: string;
+  device?: string;
+  ip_address?: string;
+  page_url?: string;
+  api_endpoint?: string;
+  http_status?: number;
+  error_code?: string;
+  error_message?: string;
+  gps_accuracy?: number;
+  location_name?: string;
+  assigned_to?: string;
+  created_at: string;
+  updated_at: string;
+  resolved_at?: string;
+}
+
+export interface AuditLog {
+  id: number;
+  actor: string;
+  role: string;
+  action: string;
+  module: string;
+  target: string;
+  old_value: any;
+  new_value: any;
+  ip_address: string;
+  user_agent: string;
+  created_at: string;
+}
+
+export interface SystemHealth {
+  backend: 'ONLINE' | 'WARNING' | 'ERROR';
+  mysql: 'ONLINE' | 'WARNING' | 'ERROR';
+  cdn: 'ONLINE' | 'WARNING' | 'ERROR';
+  localDisk: 'OK' | 'WARNING' | 'ERROR';
 }

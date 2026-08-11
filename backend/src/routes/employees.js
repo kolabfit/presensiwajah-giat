@@ -6,6 +6,7 @@ const pool = require('../db/connection');
 const { authMiddleware } = require('./admin');
 const { uploadDataUrl, deleteAsset, CDN_BASE_URL, isLocalAssetId, localAssetUrl } = require('../services/cdn');
 const { extractDescriptor } = require('../services/faceRecognition');
+const { logAudit } = require('../utils/auditLogger');
 
 function createEmployeeQrCode() {
   return `GIAT-EMP-${crypto.randomUUID()}`;
@@ -284,6 +285,7 @@ router.post('/', async (req, res) => {
     }
 
     await insertEmployeeWithoutFace(employeeName, employeeStatus, qrCode);
+    await logAudit('Admin/System', 'SYSTEM', 'CREATE', 'EMPLOYEE', employeeName, null, { status: employeeStatus }, req);
     res.json({ success: true, message: 'Pegawai berhasil ditambahkan. Wajah bisa diregistrasi dari halaman user.', qr_code: qrCode, face_registered: false });
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY') {
@@ -333,6 +335,9 @@ router.put('/:name', async (req, res) => {
     } else {
       await pool.query('UPDATE employees SET status = ? WHERE name = ?', [nextStatus, name]);
     }
+    
+    await logAudit('Admin/System', 'SYSTEM', 'UPDATE', 'EMPLOYEE', name, existing[0], { status: nextStatus, photo_updated: !!photoDataUrl }, req);
+    
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating employee:', error);
@@ -369,6 +374,8 @@ router.delete('/:name', async (req, res) => {
         ? `Pegawai dihapus. ${attendance[0].count} data absensi tetap tersimpan di riwayat.`
         : 'Pegawai berhasil dihapus.'
     });
+    
+    await logAudit('Admin/System', 'SYSTEM', 'DELETE', 'EMPLOYEE', name, null, null, req);
   } catch (error) {
     console.error('Error deleting employee:', error);
     res.status(500).json({ success: false, message: 'Internal server error' });
@@ -425,6 +432,9 @@ router.put('/:id/locations', authMiddleware, async (req, res) => {
     }
 
     await connection.commit();
+    
+    await logAudit(req.admin.id, req.admin.role, 'UPDATE_LOCATIONS', 'EMPLOYEE', `Employee ID: ${id}`, null, { locations }, req);
+    
     res.json({ success: true, message: 'Lokasi penugasan pegawai berhasil diperbarui' });
   } catch (error) {
     await connection.rollback();

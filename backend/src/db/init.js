@@ -173,10 +173,91 @@ async function initDatabase() {
         id INT PRIMARY KEY AUTO_INCREMENT,
         admin_id VARCHAR(50) NOT NULL DEFAULT 'admin',
         password VARCHAR(255) NOT NULL DEFAULT 'giat123',
+        role ENUM('SUPERADMIN', 'ADMIN') NOT NULL DEFAULT 'ADMIN',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        last_login TIMESTAMP NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+    await addColumnIfMissing(connection, 'admin_config', 'role', "ENUM('SUPERADMIN', 'ADMIN') NOT NULL DEFAULT 'ADMIN'");
+    await addColumnIfMissing(connection, 'admin_config', 'is_active', 'BOOLEAN NOT NULL DEFAULT TRUE');
+    await addColumnIfMissing(connection, 'admin_config', 'last_login', 'TIMESTAMP NULL');
+    await addColumnIfMissing(connection, 'admin_config', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
     console.log('✅ Tabel "admin_config" siap.');
+
+    // Tabel audit_logs
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        actor VARCHAR(100),
+        role VARCHAR(50),
+        action VARCHAR(100) NOT NULL,
+        module VARCHAR(100) NOT NULL,
+        target VARCHAR(255),
+        old_value JSON,
+        new_value JSON,
+        ip_address VARCHAR(45),
+        user_agent TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await addColumnIfMissing(connection, 'audit_logs', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+    console.log('✅ Tabel "audit_logs" siap.');
+
+    // Tabel tickets
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS tickets (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        ticket_number VARCHAR(50) NOT NULL UNIQUE,
+        employee_id INT NULL,
+        reporter_name VARCHAR(100) NOT NULL,
+        category VARCHAR(100) NOT NULL,
+        title VARCHAR(200) NOT NULL,
+        description TEXT NOT NULL,
+        priority ENUM('LOW', 'MEDIUM', 'HIGH', 'CRITICAL') DEFAULT 'MEDIUM',
+        status ENUM('NEW', 'IN_PROGRESS', 'WAITING_REPORTER', 'RESOLVED', 'DUPLICATE', 'REJECTED') DEFAULT 'NEW',
+        screenshot_file_id VARCHAR(255) NULL,
+        screenshot_url TEXT NULL,
+        browser VARCHAR(100) NULL,
+        operating_system VARCHAR(100) NULL,
+        device VARCHAR(100) NULL,
+        ip_address VARCHAR(45) NULL,
+        page_url TEXT NULL,
+        api_endpoint TEXT NULL,
+        http_status INT NULL,
+        error_code VARCHAR(100) NULL,
+        error_message TEXT NULL,
+        gps_accuracy DECIMAL(10,2) NULL,
+        location_name VARCHAR(100) NULL,
+        assigned_to VARCHAR(100) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        resolved_at TIMESTAMP NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    console.log('✅ Tabel "tickets" siap.');
+
+    // Tabel ticket_messages
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS ticket_messages (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        ticket_id INT NOT NULL,
+        sender_type ENUM('REPORTER', 'SUPERADMIN') NOT NULL,
+        sender_user_id VARCHAR(50) NULL,
+        message TEXT NOT NULL,
+        attachment_file_id VARCHAR(255) NULL,
+        attachment_url TEXT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    
+    // Fix schema drift for older databases where sender_user_id was an INT with an old foreign key
+    try { await connection.query('ALTER TABLE ticket_messages DROP FOREIGN KEY ticket_messages_ibfk_2'); } catch (e) {}
+    try { await connection.query('ALTER TABLE ticket_messages MODIFY sender_user_id VARCHAR(50) NULL'); } catch (e) {}
+    
+    console.log('✅ Tabel "ticket_messages" siap.');
 
     // === SEED DATA (HANYA YANG ESSENTIAL) ===
 
@@ -206,10 +287,18 @@ async function initDatabase() {
     const [adminRows] = await connection.query('SELECT COUNT(*) as count FROM admin_config');
     if (adminRows[0].count === 0) {
       await connection.query(
-        'INSERT INTO admin_config (admin_id, password) VALUES (?, ?)',
-        ['admin', 'giat123']
+        'INSERT INTO admin_config (admin_id, password, role) VALUES (?, ?, ?)',
+        ['admin', 'giat123', 'SUPERADMIN']
       );
-      console.log('✅ Default admin ditambahkan (id: admin, password: giat123).');
+      console.log('✅ Default admin ditambahkan (id: admin, password: giat123, role: SUPERADMIN).');
+    } else {
+      // Pastikan ada setidaknya satu SUPERADMIN
+      const [superadminRows] = await connection.query("SELECT COUNT(*) as count FROM admin_config WHERE role = 'SUPERADMIN'");
+      if (superadminRows[0].count === 0) {
+        // Jika tidak ada SUPERADMIN, jadikan akun pertama (biasanya admin default) menjadi SUPERADMIN
+        await connection.query("UPDATE admin_config SET role = 'SUPERADMIN' ORDER BY id ASC LIMIT 1");
+        console.log('✅ Satu akun admin lama telah di-upgrade menjadi SUPERADMIN.');
+      }
     }
 
     // Tabel employees, locations, shifts SENGAJA dibiarkan kosong.

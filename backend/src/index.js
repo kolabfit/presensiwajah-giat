@@ -11,8 +11,12 @@ const locationsRoutes = require('./routes/locations');
 const shiftsRoutes = require('./routes/shifts');
 const settingsRoutes = require('./routes/settings');
 const faceRoutes = require('./routes/face');
+const ticketsRoutes = require('./routes/tickets');
+const { router: auditRoutes } = require('./routes/audit');
+const systemRoutes = require('./routes/system');
 const { startAttendanceCleanupScheduler } = require('./services/attendanceCleanup');
 const { UPLOADS_DIR } = require('./services/cdn');
+const { maintenanceMiddleware } = require('./utils/maintenance');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -25,10 +29,10 @@ morgan.token('status-colored', (_req, res) => {
   const status = res.statusCode;
   const color =
     status >= 500 ? 31 :  // merah
-    status >= 400 ? 33 :  // kuning
-    status >= 300 ? 36 :  // cyan
-    status >= 200 ? 32 :  // hijau
-    0;
+      status >= 400 ? 33 :  // kuning
+        status >= 300 ? 36 :  // cyan
+          status >= 200 ? 32 :  // hijau
+            0;
   return `\x1b[${color}m${status}\x1b[0m`;
 });
 
@@ -67,6 +71,7 @@ app.use((err, req, res, next) => {
 });
 
 // === ROUTES ===
+app.use(maintenanceMiddleware);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/employees', employeesRoutes);
@@ -74,6 +79,9 @@ app.use('/api/locations', locationsRoutes);
 app.use('/api/shifts', shiftsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/face', faceRoutes);
+app.use('/api/tickets', ticketsRoutes);
+app.use('/api/audit', auditRoutes);
+app.use('/api/system', systemRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

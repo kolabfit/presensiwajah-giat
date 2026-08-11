@@ -5,6 +5,13 @@ import Clock from './components/Clock';
 import { Shift, AttendanceData, Employee, AppSettings, AttendancePhoto, Location } from './types';
 import { api } from './services/api';
 import { LocationFormModal, EmployeeLocationModal } from './components/LocationManager';
+import { TicketForm } from './components/TicketForm';
+import { CheckTicket } from './components/CheckTicket';
+import { AdminHelpdeskTab } from './components/AdminHelpdeskTab';
+import { AuditLogTab } from './components/AuditLogTab';
+import { SystemTab } from './components/SystemTab';
+import { AdminAccountsTab } from './components/AdminAccountsTab';
+import { GlobalSettingsTab } from './components/GlobalSettingsTab';
 import { format, isAfter, addMinutes, startOfDay, subDays, isWithinInterval } from 'date-fns';
 import * as XLSX from 'xlsx';
 
@@ -16,8 +23,8 @@ const ADMIN_TAB_STORAGE_KEY = 'presensi:last-admin-tab';
 // === TOAST & CONFIRM SYSTEM ===
 type ToastType = 'success' | 'error' | 'info';
 interface ToastItem { id: number; message: string; type: ToastType; }
-type AppView = 'employee' | 'face-register' | 'admin-login' | 'admin-dashboard';
-type AdminTab = 'dashboard' | 'history' | 'employees' | 'master-data' | 'attendance-photos' | 'settings';
+type AppView = 'employee' | 'face-register' | 'admin-login' | 'admin-dashboard' | 'helpdesk-form' | 'check-ticket' | 'maintenance';
+type AdminTab = 'dashboard' | 'history' | 'employees' | 'master-data' | 'attendance-photos' | 'settings' | 'helpdesk' | 'audit' | 'system' | 'admin-accounts' | 'global-settings';
 type DetectedFace = { boundingBox: DOMRectReadOnly };
 type WakeLockSentinel = {
   release: () => Promise<void>;
@@ -415,8 +422,38 @@ function ToastProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+function MaintenanceScreen({ onAdminClick }: { onAdminClick: () => void }) {
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-6 relative overflow-hidden">
+      <div className="absolute top-6 right-6">
+        <button onClick={onAdminClick} className="text-slate-400 hover:text-slate-600 transition-colors flex items-center gap-2 text-sm font-medium">
+          <ShieldCheck size={18} /> Admin Access
+        </button>
+      </div>
+      <div className="bg-white p-8 md:p-12 rounded-3xl shadow-lg border border-slate-100 max-w-lg w-full text-center flex flex-col items-center relative z-10">
+        <div className="w-24 h-24 bg-red-50 rounded-full flex items-center justify-center mb-6">
+          <Settings className="text-red-500" style={{ animation: 'spin 3s linear infinite' }} size={48} />
+        </div>
+        <h2 className="text-3xl font-extrabold text-slate-800 mb-4">Under Maintenance</h2>
+        <p className="text-slate-600 text-lg leading-relaxed mb-8">
+          Sistem sedang dalam perbaikan rutin (Maintenance Mode). Kami akan segera kembali, silakan coba beberapa saat lagi.
+        </p>
+        <button onClick={() => window.location.reload()} className="px-8 py-3 bg-[#B21B1B] text-white rounded-xl font-bold hover:bg-red-900 transition-all shadow-md flex items-center gap-2">
+          <RefreshCw size={20} /> Coba Lagi
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState<AppView>(() => readStoredAppView());
+
+  useEffect(() => {
+    const handleMaintenance = () => setView('maintenance');
+    window.addEventListener('maintenance-mode', handleMaintenance);
+    return () => window.removeEventListener('maintenance-mode', handleMaintenance);
+  }, []);
 
   useEffect(() => {
     try {
@@ -429,11 +466,14 @@ export default function App() {
     <ToastProvider>
     <div className="min-h-screen bg-[#F8F9FA] font-sans text-slate-900">
       <AnimatePresence mode="wait">
-        {view === 'employee' && (
-          <EmployeePage onAdminClick={() => setView('admin-login')} onRegisterFaceClick={() => setView('face-register')} />
+        {(view === 'employee' || view === 'helpdesk-form' || view === 'check-ticket') && (
+          <EmployeePage onAdminClick={() => setView('admin-login')} onRegisterFaceClick={() => setView('face-register')} onReportIssueClick={() => setView('helpdesk-form')} onCheckTicketClick={() => setView('check-ticket')} />
         )}
         {view === 'face-register' && (
           <FaceRegistrationPage onBack={() => setView('employee')} />
+        )}
+        {view === 'maintenance' && (
+          <MaintenanceScreen onAdminClick={() => setView('admin-login')} />
         )}
         {view === 'admin-login' && (
           <AdminLogin onLoginSuccess={() => setView('admin-dashboard')} onBack={() => setView('employee')} />
@@ -441,13 +481,28 @@ export default function App() {
         {view === 'admin-dashboard' && (
           <AdminDashboard onLogout={() => setView('employee')} />
         )}
+        {view === 'helpdesk-form' && (
+          <TicketFormWrapper onCancel={() => setView('employee')} />
+        )}
+        {view === 'check-ticket' && (
+          <CheckTicketWrapper onCancel={() => setView('employee')} />
+        )}
       </AnimatePresence>
     </div>
     </ToastProvider>
   );
 }
 
-function EmployeePage({ onAdminClick, onRegisterFaceClick }: { onAdminClick: () => void; onRegisterFaceClick: () => void }) {
+function TicketFormWrapper({ onCancel }: { onCancel: () => void }) {
+  const toast = useToast();
+  return <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm animate-in fade-in"><TicketForm onCancel={onCancel} useToast={toast} /></div>;
+}
+function CheckTicketWrapper({ onCancel }: { onCancel: () => void }) {
+  const toast = useToast();
+  return <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm animate-in fade-in"><CheckTicket onCancel={onCancel} useToast={toast} /></div>;
+}
+
+function EmployeePage({ onAdminClick, onRegisterFaceClick, onReportIssueClick, onCheckTicketClick }: { onAdminClick: () => void; onRegisterFaceClick: () => void; onReportIssueClick: () => void; onCheckTicketClick: () => void; }) {
   const { showToast } = useToast();
   const [location, setLocation] = useState('');
   const [shift, setShift] = useState<Shift | ''>('');
@@ -1234,6 +1289,24 @@ function EmployeePage({ onAdminClick, onRegisterFaceClick }: { onAdminClick: () 
         </div>
       )}
 
+      {/* Helpdesk Area */}
+      <div className="mt-8 flex flex-col sm:flex-row gap-3">
+        <button onClick={onReportIssueClick} className="flex-1 bg-white rounded-xl p-4 shadow-sm border border-slate-200 hover:border-[#B21B1B] hover:shadow-md transition-all flex items-center gap-3">
+          <div className="w-10 h-10 bg-red-50 text-[#B21B1B] rounded-full flex items-center justify-center"><AlertCircle size={20} /></div>
+          <div className="text-left">
+            <h4 className="font-bold text-slate-800 text-sm">Laporkan Kendala</h4>
+            <p className="text-[10px] text-slate-500 mt-0.5">Sistem error atau butuh bantuan?</p>
+          </div>
+        </button>
+        <button onClick={onCheckTicketClick} className="flex-1 bg-white rounded-xl p-4 shadow-sm border border-slate-200 hover:border-blue-500 hover:shadow-md transition-all flex items-center gap-3">
+          <div className="w-10 h-10 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center"><Search size={20} /></div>
+          <div className="text-left">
+            <h4 className="font-bold text-slate-800 text-sm">Cek Status Laporan</h4>
+            <p className="text-[10px] text-slate-500 mt-0.5">Lihat progres perbaikan kendala</p>
+          </div>
+        </button>
+      </div>
+
       {/* Processing Popup */}
       {isProcessing && !recognizedFace && (
         <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-6 backdrop-blur-sm">
@@ -1968,6 +2041,9 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   const [showPresentPopup, setShowPresentPopup] = useState(false);
   const [showLatePopup, setShowLatePopup] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ src: string; title: string; subtitle: string } | null>(null);
+  const [adminRole, setAdminRole] = useState<string>(() => {
+    try { return localStorage.getItem('admin_role') || 'ADMIN'; } catch { return 'ADMIN'; }
+  });
 
   // History Filters
   const [startDate, setStartDate] = useState(format(subDays(new Date(), 5), 'yyyy-MM-dd'));
@@ -1996,6 +2072,13 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     fetchData();
     fetchAdminSettings();
+    api.verifyToken().then(res => {
+      if (res.success && res.role) {
+        setAdminRole(res.role);
+      } else {
+        handleLogout();
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -2176,6 +2259,18 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           <SidebarItem collapsed={isDesktopCollapsed} icon={<Database size={22} />} label="Master Data" active={activeTab === 'master-data'} onClick={() => setActiveTab('master-data')} />
           <SidebarItem collapsed={isDesktopCollapsed} icon={<ImageIcon size={22} />} label="Foto Presensi" active={activeTab === 'attendance-photos'} onClick={() => setActiveTab('attendance-photos')} />
           <SidebarItem collapsed={isDesktopCollapsed} icon={<Settings size={22} />} label="Pengaturan" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
+          {adminRole === 'SUPERADMIN' && (
+            <>
+              <div className="pt-4 mt-4 border-t border-slate-100 px-3">
+                <p className="px-3 text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Superadmin</p>
+                <SidebarItem collapsed={isDesktopCollapsed} icon={<Settings size={22} />} label="Parameter Global" active={activeTab === 'global-settings'} onClick={() => setActiveTab('global-settings')} />
+                <SidebarItem collapsed={isDesktopCollapsed} icon={<AlertCircle size={22} />} label="Helpdesk" active={activeTab === 'helpdesk'} onClick={() => setActiveTab('helpdesk')} />
+                <SidebarItem collapsed={isDesktopCollapsed} icon={<History size={22} />} label="Audit Logs" active={activeTab === 'audit'} onClick={() => setActiveTab('audit')} />
+                <SidebarItem collapsed={isDesktopCollapsed} icon={<Database size={22} />} label="System Health" active={activeTab === 'system'} onClick={() => setActiveTab('system')} />
+                <SidebarItem collapsed={isDesktopCollapsed} icon={<ShieldCheck size={22} />} label="Admin Accounts" active={activeTab === 'admin-accounts'} onClick={() => setActiveTab('admin-accounts')} />
+              </div>
+            </>
+          )}
         </nav>
 
         <button 
@@ -2201,7 +2296,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
             <div className="flex items-center gap-3 pl-4">
                <div className="text-right hidden sm:block">
                  <div className="text-sm font-bold text-slate-800">Admin Koperasi</div>
-                 <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Administrator</div>
+                 <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{adminRole}</div>
                </div>
                <div className="w-10 h-10 bg-slate-200 rounded-full overflow-hidden border-2 border-white shadow-sm flex items-center justify-center">
                  <User className="text-slate-500 w-6 h-6" />
@@ -2530,6 +2625,12 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                   </div>
                 </div>
               )}
+
+              {adminRole === 'SUPERADMIN' && activeTab === 'helpdesk' && <AdminHelpdeskTab useToast={useToast()} />}
+              {adminRole === 'SUPERADMIN' && activeTab === 'audit' && <AuditLogTab useToast={useToast()} />}
+              {adminRole === 'SUPERADMIN' && activeTab === 'system' && <SystemTab useToast={useToast()} />}
+              {adminRole === 'SUPERADMIN' && activeTab === 'admin-accounts' && <AdminAccountsTab useToast={useToast()} />}
+              {adminRole === 'SUPERADMIN' && activeTab === 'global-settings' && <GlobalSettingsTab useToast={useToast()} />}
             </motion.div>
           )}
         </main>
@@ -2544,6 +2645,15 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
           <BottomNavItem icon={<Database size={20} />} label="Master" active={activeTab === 'master-data'} onClick={() => setActiveTab('master-data')} />
           <BottomNavItem icon={<ImageIcon size={20} />} label="Foto" active={activeTab === 'attendance-photos'} onClick={() => setActiveTab('attendance-photos')} />
           <BottomNavItem icon={<Settings size={20} />} label="Setting" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
+          {adminRole === 'SUPERADMIN' && (
+            <>
+              <BottomNavItem icon={<Settings size={20} />} label="Global" active={activeTab === 'global-settings'} onClick={() => setActiveTab('global-settings')} />
+              <BottomNavItem icon={<AlertCircle size={20} />} label="Help" active={activeTab === 'helpdesk'} onClick={() => setActiveTab('helpdesk')} />
+              <BottomNavItem icon={<History size={20} />} label="Audit" active={activeTab === 'audit'} onClick={() => setActiveTab('audit')} />
+              <BottomNavItem icon={<Database size={20} />} label="Sys" active={activeTab === 'system'} onClick={() => setActiveTab('system')} />
+              <BottomNavItem icon={<ShieldCheck size={20} />} label="Acc" active={activeTab === 'admin-accounts'} onClick={() => setActiveTab('admin-accounts')} />
+            </>
+          )}
         </nav>
       </div>
 
