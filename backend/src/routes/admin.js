@@ -87,26 +87,39 @@ function superAdminMiddleware(req, res, next) {
 
 /**
  * POST /api/admin/update-password
- * Update konfigurasi admin (password saja untuk user yang sedang login)
+ * Update konfigurasi admin (ID dan Password)
  */
 router.post('/update-password', authMiddleware, async (req, res) => {
   try {
-    const { password } = req.body;
+    const { id: newAdminId, password } = req.body;
     const adminId = req.admin.id;
 
     if (!password) {
       return res.status(400).json({ success: false, message: 'Password wajib diisi' });
     }
 
-    await pool.query(
-      'UPDATE admin_config SET password = ? WHERE admin_id = ?',
-      [password, adminId]
-    );
+    if (newAdminId && newAdminId !== adminId) {
+      // Periksa apakah admin_id baru sudah ada
+      const [existing] = await pool.query('SELECT id FROM admin_config WHERE admin_id = ?', [newAdminId]);
+      if (existing.length > 0) {
+        return res.status(400).json({ success: false, message: 'Admin ID sudah digunakan' });
+      }
+
+      await pool.query(
+        'UPDATE admin_config SET admin_id = ?, password = ? WHERE admin_id = ?',
+        [newAdminId, password, adminId]
+      );
+    } else {
+      await pool.query(
+        'UPDATE admin_config SET password = ? WHERE admin_id = ?',
+        [password, adminId]
+      );
+    }
 
     // Invalidate semua session user ini (opsional) atau semua session
     activeSessions.clear();
 
-    await logAudit(adminId, req.admin.role, 'UPDATE_PASSWORD', 'ADMIN_ACCOUNT', adminId, null, null, req);
+    await logAudit(newAdminId || adminId, req.admin.role, 'UPDATE_ACCOUNT', 'ADMIN_ACCOUNT', adminId, null, null, req);
 
     res.json({ success: true });
   } catch (error) {
